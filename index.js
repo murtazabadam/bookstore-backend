@@ -2,34 +2,36 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const { createClient } = require('@supabase/supabase-js');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
 
 const app = express();
 const prisma = new PrismaClient();
-
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-
-const multer = require('multer');
-const { createClient } = require('@supabase/supabase-js');
-
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const upload = multer({ storage: multer.memoryStorage() });
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
 
 app.use(cors());
 app.use(express.json());
 
-// Health check
+// ── Health check ─────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Bookstore API running' });
 });
 
-// Get all categories
+// ── Categories & Products (public) ──────────────────────────
 app.get('/api/categories', async (req, res) => {
   const categories = await prisma.category.findMany();
   res.json(categories);
 });
 
-// Get products (optionally filtered by category)
 app.get('/api/products', async (req, res) => {
   const { category, search } = req.query;
   const products = await prisma.product.findMany({
@@ -42,7 +44,6 @@ app.get('/api/products', async (req, res) => {
   res.json(products);
 });
 
-// Get single product by slug
 app.get('/api/products/:slug', async (req, res) => {
   const product = await prisma.product.findUnique({
     where: { slug: req.params.slug },
@@ -52,22 +53,19 @@ app.get('/api/products/:slug', async (req, res) => {
   res.json(product);
 });
 
-// Signup
+// ── Auth ──────────────────────────────────────────────────────
 app.post('/api/auth/signup', async (req, res) => {
   const { email, password, name } = req.body;
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) return res.status(400).json({ error: 'Email already registered' });
 
   const hashedPassword = await bcrypt.hash(password, 10);
-  const user = await prisma.user.create({
-    data: { email, password: hashedPassword, name },
-  });
+  const user = await prisma.user.create({ data: { email, password: hashedPassword, name } });
 
   const token = jwt.sign({ userId: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
@@ -80,37 +78,30 @@ app.post('/api/auth/login', async (req, res) => {
   res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });
 
-// Middleware to protect routes
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'No token provided' });
 
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });
   }
 }
 
-// Example protected route — get current user
+function requireAdmin(req, res, next) {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ error: 'Admin access required' });
+  next();
+}
+
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
   res.json({ id: user.id, email: user.email, name: user.name, role: user.role });
 });
 
-
-// Middleware: only allow admins through
-function requireAdmin(req, res, next) {
-  if (req.user.role !== 'ADMIN') {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-  next();
-}
-
-// Upload a product image — returns a public URL to use when creating/editing a product
+// ── Admin: Products ──────────────────────────────────────────
 app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('image'), async (req, res) => {
   try {
     const fileName = `${Date.now()}-${req.file.originalname}`;
@@ -126,7 +117,6 @@ app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('im
   }
 });
 
-// Create a product
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   const { name, description, price, stock, categoryId, imageUrls, attributes } = req.body;
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -140,7 +130,6 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// Update a product (also used for restocking — just send the new stock number)
 app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
   const { name, description, price, stock, imageUrls, attributes } = req.body;
   try {
@@ -154,13 +143,12 @@ app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) =
   }
 });
 
-// Delete a product
 app.delete('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
   await prisma.product.delete({ where: { id: req.params.id } });
   res.json({ success: true });
 });
 
-// View all orders (for fulfilling/tracking, not just your own)
+// ── Admin: Orders ────────────────────────────────────────────
 app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
   const orders = await prisma.order.findMany({
     include: { items: { include: { product: true } }, user: true },
@@ -169,11 +157,88 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
   res.json(orders);
 });
 
-// Update order status (mark as shipped/delivered)
 app.put('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) => {
   const { status } = req.body;
   const order = await prisma.order.update({ where: { id: req.params.id }, data: { status } });
   res.json(order);
+});
+
+// ── Customer: Order history ─────────────────────────────────
+app.get('/api/orders', requireAuth, async (req, res) => {
+  const orders = await prisma.order.findMany({
+    where: { userId: req.user.userId },
+    include: { items: { include: { product: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(orders);
+});
+
+// ── Checkout: Razorpay ───────────────────────────────────────
+app.post('/api/checkout/create-order', requireAuth, async (req, res) => {
+  const { items } = req.body;
+  try {
+    let total = 0;
+    for (const item of items) {
+      const product = await prisma.product.findUnique({ where: { id: item.productId } });
+      if (!product) throw new Error(`Product not found: ${item.productId}`);
+      if (product.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name}`);
+      total += Number(product.price) * item.quantity;
+    }
+
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(total * 100),
+      currency: 'INR',
+      receipt: `receipt_${Date.now()}`,
+    });
+
+    res.json({ razorpayOrderId: razorpayOrder.id, amount: razorpayOrder.amount, keyId: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/checkout/verify', requireAuth, async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, items, shippingAddress } = req.body;
+
+  const expectedSignature = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest('hex');
+
+  if (expectedSignature !== razorpay_signature) {
+    return res.status(400).json({ error: 'Payment verification failed' });
+  }
+
+  try {
+    const order = await prisma.$transaction(async (tx) => {
+      let total = 0;
+      const orderItemsData = [];
+
+      for (const item of items) {
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        if (!product || product.stock < item.quantity) {
+          throw new Error(`Stock issue with product ${item.productId}`);
+        }
+        total += Number(product.price) * item.quantity;
+        orderItemsData.push({
+          productId: product.id,
+          quantity: item.quantity,
+          variantInfo: item.variantInfo || {},
+          priceAtPurchase: product.price,
+        });
+        await tx.product.update({ where: { id: product.id }, data: { stock: { decrement: item.quantity } } });
+      }
+
+      return tx.order.create({
+        data: { userId: req.user.userId, total, shippingAddress, status: 'PAID', items: { create: orderItemsData } },
+        include: { items: true },
+      });
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 5000;

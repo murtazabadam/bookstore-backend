@@ -1,7 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-const EMAIL_TO_PROMOTE = 'owner-email-goes-here@example.com';
+const EMAIL_TO_PROMOTE = 'junaidnazeer88@gmail.com';
 
 async function main() {
   const user = await prisma.user.update({

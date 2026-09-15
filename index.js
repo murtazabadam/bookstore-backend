@@ -117,6 +117,14 @@ app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('im
   }
 });
 
+app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
+  const products = await prisma.product.findMany({
+    include: { category: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(products);
+});
+
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   const { name, description, price, stock, categoryId, imageUrls, attributes } = req.body;
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');

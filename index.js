@@ -8,6 +8,9 @@ const multer = require('multer');
 const { createClient } = require('@supabase/supabase-js');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const session = require('express-session');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -20,6 +23,42 @@ const razorpay = new Razorpay({
 
 app.use(cors());
 app.use(express.json());
+
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'change_this_secret',
+  resave: false,
+  saveUninitialized: false,
+}));
+app.use(passport.initialize());
+app.use(passport.session());
+
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: process.env.GOOGLE_CALLBACK_URL,
+}, async (accessToken, refreshToken, profile, done) => {
+  try {
+    let user = await prisma.user.findUnique({ where: { email: profile.emails[0].value } });
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          email: profile.emails[0].value,
+          name: profile.displayName,
+          password: null,
+        },
+      });
+    }
+    done(null, user);
+  } catch (err) {
+    done(err, null);
+  }
+}));
+
+passport.serializeUser((user, done) => done(null, user.id));
+passport.deserializeUser(async (id, done) => {
+  const user = await prisma.user.findUnique({ where: { id } });
+  done(null, user);
+});
 
 // ── Health check ─────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -69,7 +108,7 @@ app.post('/api/auth/signup', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!user || !user.password) return res.status(401).json({ error: 'Invalid credentials' });
 
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
@@ -101,6 +140,16 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   res.json({ id: user.id, email: user.email, name: user.name, role: user.role });
 });
 
+app.get('/api/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+
+app.get('/api/auth/google/callback',
+  passport.authenticate('google', { session: false, failureRedirect: '/login' }),
+  (req, res) => {
+    const token = jwt.sign({ userId: req.user.id, role: req.user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.redirect(`${process.env.FRONTEND_URL}/auth/callback?token=${token}`);
+  }
+);
+
 // ── Admin: Products ──────────────────────────────────────────
 app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('image'), async (req, res) => {
   try {
@@ -126,11 +175,21 @@ app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, stock, categoryId, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, categoryId, imageUrls, attributes } = req.body;
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   try {
     const product = await prisma.product.create({
-      data: { name, slug, description, price, stock, categoryId, imageUrls: imageUrls || [], attributes: attributes || {} },
+      data: {
+        name,
+        slug,
+        description,
+        price,
+        originalPrice: originalPrice || null,
+        stock,
+        categoryId,
+        imageUrls: imageUrls || [],
+        attributes: attributes || {},
+      },
     });
     res.json(product);
   } catch (err) {
@@ -139,11 +198,19 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, stock, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, imageUrls, attributes } = req.body;
   try {
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data: { name, description, price, stock, imageUrls, attributes },
+      data: {
+        name,
+        description,
+        price,
+        originalPrice: originalPrice || null,
+        stock,
+        imageUrls,
+        attributes,
+      },
     });
     res.json(product);
   } catch (err) {

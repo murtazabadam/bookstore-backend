@@ -71,6 +71,7 @@ model Order {
   status          OrderStatus @default(PENDING)
   total           Decimal     @db.Decimal(10, 2)
   shippingAddress String
+  trackingNumber  String?
   items           OrderItem[]
   createdAt       DateTime    @default(now())
 }

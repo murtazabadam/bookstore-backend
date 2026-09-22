@@ -344,8 +344,11 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.put('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { status } = req.body;
-  const order = await prisma.order.update({ where: { id: req.params.id }, data: { status } });
+  const { status, trackingNumber } = req.body;
+  const updateData = {};
+  if (status) updateData.status = status;
+  if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
+  const order = await prisma.order.update({ where: { id: req.params.id }, data: updateData });
   res.json(order);
 });
 

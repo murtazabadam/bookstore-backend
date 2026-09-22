@@ -302,6 +302,17 @@ app.get('/api/orders', requireAuth, async (req, res) => {
   });
   res.json(orders);
 });
+app.get('/api/orders/:id', requireAuth, async (req, res) => {
+  const order = await prisma.order.findUnique({
+    where: { id: req.params.id },
+    include: { items: { include: { product: true } } },
+  });
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.userId !== req.user.userId && req.user.role !== 'ADMIN') {
+    return res.status(403).json({ error: 'Not authorized to view this order' });
+  }
+  res.json(order);
+});
 
 // ── Checkout: Razorpay ───────────────────────────────────────
 app.post('/api/checkout/create-order', requireAuth, async (req, res) => {

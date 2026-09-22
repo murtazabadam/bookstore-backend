@@ -45,6 +45,7 @@ passport.use(new GoogleStrategy({
           email: profile.emails[0].value,
           name: profile.displayName,
           password: null,
+          emailVerified: true,
         },
       });
     }
@@ -59,6 +60,28 @@ passport.deserializeUser(async (id, done) => {
   const user = await prisma.user.findUnique({ where: { id } });
   done(null, user);
 });
+
+// ── Email sending via Brevo ─────────────────────────────────
+async function sendOtpEmail(email, code) {
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: process.env.BREVO_SENDER_NAME, email: process.env.BREVO_SENDER_EMAIL },
+      to: [{ email }],
+      subject: 'Verify your email - Maktabah Islamiyah',
+      htmlContent: `<p>Your verification code is <strong>${code}</strong>. It expires in 10 minutes.</p><p>If you didn't request this, you can ignore this email.</p>`,
+    }),
+  });
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Brevo error: ${errText}`);
+  }
+}
 
 // ── Health check ─────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -92,19 +115,63 @@ app.get('/api/products/:slug', async (req, res) => {
   res.json(product);
 });
 
-// ── Auth ──────────────────────────────────────────────────────
-app.post('/api/auth/signup', async (req, res) => {
-  const { email, password, name } = req.body;
+// ── Auth: Signup with email OTP ──────────────────────────────
+app.post('/api/auth/send-otp', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+
   const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) return res.status(400).json({ error: 'Email already registered' });
+  if (existing && existing.emailVerified) {
+    return res.status(400).json({ error: 'Email already registered' });
+  }
 
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const user = await prisma.user.create({ data: { email, password: hashedPassword, name } });
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-  const token = jwt.sign({ userId: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+  await prisma.emailOtp.upsert({
+    where: { email },
+    update: { code, expiresAt },
+    create: { email, code, expiresAt },
+  });
+
+  try {
+    await sendOtpEmail(email, code);
+    res.json({ message: 'OTP sent' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to send verification email' });
+  }
 });
 
+app.post('/api/auth/verify-signup', async (req, res) => {
+  const { name, email, phone, password, otp } = req.body;
+
+  const record = await prisma.emailOtp.findUnique({ where: { email } });
+  if (!record || record.code !== otp || record.expiresAt < new Date()) {
+    return res.status(400).json({ error: 'Invalid or expired OTP' });
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const existing = await prisma.user.findUnique({ where: { email } });
+
+  let user;
+  if (existing) {
+    user = await prisma.user.update({
+      where: { email },
+      data: { name, phone, password: hashedPassword, emailVerified: true },
+    });
+  } else {
+    user = await prisma.user.create({
+      data: { email, name, phone, password: hashedPassword, emailVerified: true },
+    });
+  }
+
+  await prisma.emailOtp.delete({ where: { email } }).catch(() => {});
+
+  const token = jwt.sign({ userId: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, user: { id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role } });
+});
+
+// ── Auth: Login ───────────────────────────────────────────────
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
@@ -114,7 +181,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
   const token = jwt.sign({ userId: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+  res.json({ token, user: { id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role } });
 });
 
 function requireAuth(req, res, next) {
@@ -137,7 +204,7 @@ function requireAdmin(req, res, next) {
 
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
-  res.json({ id: user.id, email: user.email, name: user.name, role: user.role });
+  res.json({ id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role });
 });
 
 app.get('/api/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
@@ -180,13 +247,9 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   try {
     const product = await prisma.product.create({
       data: {
-        name,
-        slug,
-        description,
-        price,
+        name, slug, description, price,
         originalPrice: originalPrice || null,
-        stock,
-        categoryId,
+        stock, categoryId,
         imageUrls: imageUrls || [],
         attributes: attributes || {},
       },
@@ -202,15 +265,7 @@ app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) =
   try {
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data: {
-        name,
-        description,
-        price,
-        originalPrice: originalPrice || null,
-        stock,
-        imageUrls,
-        attributes,
-      },
+      data: { name, description, price, originalPrice: originalPrice || null, stock, imageUrls, attributes },
     });
     res.json(product);
   } catch (err) {

@@ -206,6 +206,26 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
   res.json({ id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role });
 });
+app.put('/api/auth/me', requireAuth, async (req, res) => {
+  const { name, phone, currentPassword, newPassword } = req.body;
+  const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
+
+  const updateData = {};
+  if (name) updateData.name = name;
+  if (phone) updateData.phone = phone;
+
+  if (newPassword) {
+    if (!currentPassword || !user.password) {
+      return res.status(400).json({ error: 'Current password required to change password' });
+    }
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+    updateData.password = await bcrypt.hash(newPassword, 10);
+  }
+
+  const updated = await prisma.user.update({ where: { id: req.user.userId }, data: updateData });
+  res.json({ id: updated.id, email: updated.email, name: updated.name, phone: updated.phone, role: updated.role });
+});
 
 app.get('/api/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
@@ -216,6 +236,42 @@ app.get('/api/auth/google/callback',
     res.redirect(`${process.env.FRONTEND_URL}/auth/callback?token=${token}`);
   }
 );
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) return res.status(404).json({ error: 'No account found with this email' });
+
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+  await prisma.emailOtp.upsert({
+    where: { email },
+    update: { code, expiresAt },
+    create: { email, code, expiresAt },
+  });
+
+  try {
+    await sendOtpEmail(email, code);
+    res.json({ message: 'Reset code sent' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to send reset email' });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  const record = await prisma.emailOtp.findUnique({ where: { email } });
+  if (!record || record.code !== otp || record.expiresAt < new Date()) {
+    return res.status(400).json({ error: 'Invalid or expired code' });
+  }
+
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  await prisma.user.update({ where: { email }, data: { password: hashedPassword } });
+  await prisma.emailOtp.delete({ where: { email } }).catch(() => {});
+
+  res.json({ message: 'Password reset successful' });
+});
 
 // ── Admin: Products ──────────────────────────────────────────
 app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('image'), async (req, res) => {

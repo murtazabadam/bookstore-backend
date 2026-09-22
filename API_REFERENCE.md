@@ -10,10 +10,10 @@ Authorization: Bearer <token>
 
 ---
 
-## Auth
+## Auth — Signup
 
 ### `POST /api/auth/send-otp`
-Sends a 6-digit verification code to the given email (via Brevo). Used for both new signups and resending a code.
+Sends a 6-digit verification code to the given email (via Brevo). Used for new signups.
 
 **Request:**
 ```json
@@ -28,7 +28,7 @@ Sends a 6-digit verification code to the given email (via Brevo). Used for both 
 ---
 
 ### `POST /api/auth/verify-signup`
-Verifies the OTP and creates (or completes) the account. This is the actual account-creation step.
+Verifies the OTP and creates (or completes) the account.
 
 **Request:**
 ```json
@@ -57,6 +57,8 @@ Verifies the OTP and creates (or completes) the account. This is the actual acco
 
 ---
 
+## Auth — Login & Session
+
 ### `POST /api/auth/login`
 **Request:**
 ```json
@@ -76,6 +78,25 @@ Returns the current logged-in user.
 
 ---
 
+### `PUT /api/auth/me` *(auth required)*
+Updates name, phone, and/or password for the logged-in user. All fields optional — send only what's changing.
+
+**Request (name/phone only):**
+```json
+{ "name": "New Name", "phone": "9999999999" }
+```
+**Request (changing password too):**
+```json
+{ "currentPassword": "old_password", "newPassword": "new_password" }
+```
+**Response (200):**
+```json
+{ "id": "uuid", "email": "...", "name": "...", "phone": "...", "role": "CUSTOMER" }
+```
+**Errors:** `400` if changing password without `currentPassword`; `401` if `currentPassword` is wrong.
+
+---
+
 ### `GET /api/auth/google`
 Redirects to Google's OAuth consent screen. Link a "Continue with Google" button directly to this URL — no fetch/AJAX needed, just navigate the browser here.
 
@@ -85,6 +106,38 @@ Handled entirely by the backend. After Google login, redirects the browser to:
 {FRONTEND_URL}/auth/callback?token=<jwt_token>
 ```
 **Frontend must have a `/auth/callback` page** that reads the `token` query param, stores it the same way normal login does, then redirects to the homepage.
+
+---
+
+## Auth — Forgot Password
+
+### `POST /api/auth/forgot-password`
+Sends a 6-digit reset code to the given email (only if an account with that email exists).
+
+**Request:**
+```json
+{ "email": "user@example.com" }
+```
+**Response (200):**
+```json
+{ "message": "Reset code sent" }
+```
+**Errors:** `404` if no account exists with that email.
+
+---
+
+### `POST /api/auth/reset-password`
+Verifies the reset code and sets a new password.
+
+**Request:**
+```json
+{ "email": "user@example.com", "otp": "123456", "newPassword": "new_password" }
+```
+**Response (200):**
+```json
+{ "message": "Password reset successful" }
+```
+**Errors:** `400` if code invalid or expired.
 
 ---
 
@@ -144,7 +197,7 @@ Call this from Razorpay's `handler` callback after payment. Verifies the payment
   "shippingAddress": "full address as a single string"
 }
 ```
-Pass these three `razorpay_*` fields exactly as Razorpay's widget returns them in its response object — do not rename or restructure them.
+Pass the three `razorpay_*` fields exactly as Razorpay's widget returns them in its response object — do not rename or restructure them.
 
 **Response (200):** the created order object, including `items`.
 **Errors:** `400` — either `"Payment verification failed"` (signature mismatch) or a stock-related message.
@@ -188,4 +241,4 @@ Valid values: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`.
 
 ## Notes
 - This document is the source of truth. If something here doesn't match actual backend behavior, that's a bug to report — not a signal to guess a workaround.
-- Last updated: reflects backend as of the email-OTP-verification and `/api/orders/:id` additions.
+- Last updated: reflects backend as of forgot-password, account-update, and order-by-id additions.

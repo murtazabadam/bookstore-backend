@@ -95,15 +95,26 @@ app.get('/api/categories', async (req, res) => {
 });
 
 app.get('/api/products', async (req, res) => {
-  const { category, search } = req.query;
+  const { category, subcategory, search } = req.query;
   const products = await prisma.product.findMany({
     where: {
       ...(category && { category: { slug: category } }),
+      ...(subcategory && { subcategory }),
       ...(search && { name: { contains: search, mode: 'insensitive' } }),
     },
     include: { category: true },
   });
   res.json(products);
+});
+
+app.get('/api/products/subcategories', async (req, res) => {
+  const { category } = req.query;
+  const products = await prisma.product.findMany({
+    where: { subcategory: { not: null }, ...(category && { category: { slug: category } }) },
+    select: { subcategory: true },
+    distinct: ['subcategory'],
+  });
+  res.json(products.map(p => p.subcategory));
 });
 
 app.get('/api/products/:slug', async (req, res) => {
@@ -298,7 +309,7 @@ app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, categoryId, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, categoryId, subcategory, imageUrls, attributes } = req.body;
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   try {
     const product = await prisma.product.create({
@@ -306,6 +317,7 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
         name, slug, description, price,
         originalPrice: originalPrice || null,
         stock, categoryId,
+        subcategory: subcategory || null,
         imageUrls: imageUrls || [],
         attributes: attributes || {},
       },
@@ -317,11 +329,11 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, subcategory, imageUrls, attributes } = req.body;
   try {
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data: { name, description, price, originalPrice: originalPrice || null, stock, imageUrls, attributes },
+      data: { name, description, price, originalPrice: originalPrice || null, stock, subcategory: subcategory || null, imageUrls, attributes },
     });
     res.json(product);
   } catch (err) {

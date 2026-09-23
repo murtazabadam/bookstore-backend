@@ -58,6 +58,7 @@ model Product {
   imageUrls     String[]
   attributes    Json        @default("{}")
   categoryId    String
+  subcategory   String?
   category      Category    @relation(fields: [categoryId], references: [id])
   orderItems    OrderItem[]
   createdAt     DateTime    @default(now())

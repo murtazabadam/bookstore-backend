@@ -6,9 +6,10 @@ async function main() {
   const catId = (slug) => categories.find(c => c.slug === slug).id;
 
   const products = [
-    { name: 'The Riyadhus-Saliheen', slug: 'riyadhus-saliheen', description: 'A renowned compilation of authentic hadiths by Imam Nawawi.', price: 499, stock: 40, category: 'books', attributes: { author: 'Imam Nawawi', language: 'English/Arabic' } },
-    { name: 'Sahih Al-Bukhari (Arabic)', slug: 'sahih-al-bukhari-arabic', description: 'The most authentic collection of hadith, complete set.', price: 799, stock: 25, category: 'books', attributes: { author: 'Imam Bukhari', language: 'Arabic' } },
-    { name: 'Fortress of the Muslim', slug: 'fortress-of-the-muslim', description: 'A pocket-sized collection of daily duas and adhkar.', price: 399, stock: 60, category: 'books', attributes: { author: 'Said bin Ali bin Wahf Al-Qahtani', language: 'English/Arabic' } },
+    { name: 'The Riyadhus-Saliheen', slug: 'riyadhus-saliheen', description: 'A renowned compilation of authentic hadiths by Imam Nawawi.', price: 499, stock: 40, category: 'books', subcategory: 'Hadith', attributes: { author: 'Imam Nawawi', language: 'English/Arabic' } },
+    { name: 'Sahih Al-Bukhari (Arabic)', slug: 'sahih-al-bukhari-arabic', description: 'The most authentic collection of hadith, complete set.', price: 799, stock: 25, category: 'books', subcategory: 'Hadith', attributes: { author: 'Imam Bukhari', language: 'Arabic' } },
+    { name: 'Fortress of the Muslim', slug: 'fortress-of-the-muslim', description: 'A pocket-sized collection of daily duas and adhkar.', price: 399, stock: 60, category: 'books', subcategory: 'Islamic Studies', attributes: { author: 'Said bin Ali bin Wahf Al-Qahtani', language: 'English/Arabic' } },
+    { name: 'Kitab al-Tawheed', slug: 'kitab-al-tawheed', description: 'A foundational text on Islamic monotheism.', price: 150.99, stock: 50, category: 'books', subcategory: 'Islamic Studies', attributes: { author: 'Muhammad ibn Abd al-Wahhab', language: 'English' } },
 
     { name: 'Rasasi Hawas Attar', slug: 'rasasi-hawas-attar', description: 'Long-lasting alcohol-free fragrance oil, 12ml.', price: 699, stock: 35, category: 'attars', attributes: { volume_ml: '12', scent_notes: 'Amber, Woody' } },
     { name: 'Oud Attar', slug: 'oud-attar', description: 'Premium alcohol-free oud fragrance oil.', price: 799, stock: 30, category: 'attars', attributes: { volume_ml: '12', scent_notes: 'Oud, Musk' } },
@@ -28,22 +29,23 @@ async function main() {
   ];
 
   for (const p of products) {
-    await prisma.product.upsert({
-      where: { slug: p.slug },
-      update: {},
-      create: {
-        name: p.name,
-        slug: p.slug,
-        description: p.description,
-        price: p.price,
-        stock: p.stock,
-        imageUrls: [],
-        attributes: p.attributes,
-        categoryId: catId(p.category),
-      },
-    });
-    console.log(`Upserted: ${p.name}`);
-  }
+  await prisma.product.upsert({
+    where: { slug: p.slug },
+    update: { subcategory: p.subcategory || null },
+    create: {
+      name: p.name,
+      slug: p.slug,
+      description: p.description,
+      price: p.price,
+      stock: p.stock,
+      imageUrls: [],
+      attributes: p.attributes,
+      categoryId: catId(p.category),
+      subcategory: p.subcategory || null,
+    },
+  });
+  console.log(`Upserted: ${p.name}`);
+}
 
   console.log('\nSeed complete.');
 }

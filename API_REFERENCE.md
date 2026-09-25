@@ -8,50 +8,27 @@ All request/response bodies are JSON. Authenticated routes require:
 Authorization: Bearer <token>
 ```
 
+**All error responses use the shape `{ "error": "message here" }`** — the field is always `error`, never `message`.
+
 ---
 
 ## Auth — Signup
 
 ### `POST /api/auth/send-otp`
-Sends a 6-digit verification code to the given email (via Brevo). Used for new signups.
-
-**Request:**
-```json
-{ "email": "user@example.com" }
-```
-**Response (200):**
-```json
-{ "message": "OTP sent" }
-```
+Sends a 6-digit verification code to the given email (via Brevo).
+**Request:** `{ "email": "user@example.com" }`
+**Response (200):** `{ "message": "OTP sent" }`
 **Errors:** `400` if email already registered and verified.
-
----
 
 ### `POST /api/auth/verify-signup`
 Verifies the OTP and creates (or completes) the account.
-
 **Request:**
 ```json
-{
-  "name": "Full Name",
-  "email": "user@example.com",
-  "phone": "9876543210",
-  "password": "plaintext_password",
-  "otp": "123456"
-}
+{ "name": "Full Name", "email": "user@example.com", "phone": "9876543210", "password": "plaintext_password", "otp": "123456" }
 ```
 **Response (200):**
 ```json
-{
-  "token": "jwt_token_here",
-  "user": {
-    "id": "uuid",
-    "email": "user@example.com",
-    "name": "Full Name",
-    "phone": "9876543210",
-    "role": "CUSTOMER"
-  }
-}
+{ "token": "jwt_token", "user": { "id": "uuid", "email": "...", "name": "...", "phone": "...", "role": "CUSTOMER" } }
 ```
 **Errors:** `400` if OTP invalid or expired.
 
@@ -60,83 +37,42 @@ Verifies the OTP and creates (or completes) the account.
 ## Auth — Login & Session
 
 ### `POST /api/auth/login`
-**Request:**
-```json
-{ "email": "user@example.com", "password": "plaintext_password" }
-```
+**Request:** `{ "email": "user@example.com", "password": "plaintext_password" }`
 **Response (200):** same shape as `verify-signup`.
-**Errors:** `401` invalid credentials.
-
----
+**Errors:** `401` invalid credentials (also returned for deleted accounts).
 
 ### `GET /api/auth/me` *(auth required)*
-Returns the current logged-in user.
-**Response (200):**
-```json
-{ "id": "uuid", "email": "...", "name": "...", "phone": "...", "role": "CUSTOMER" }
-```
-
----
+**Response (200):** `{ "id": "uuid", "email": "...", "name": "...", "phone": "...", "role": "CUSTOMER" }`
 
 ### `PUT /api/auth/me` *(auth required)*
-Updates name, phone, and/or password for the logged-in user. All fields optional — send only what's changing.
+Updates name, phone, and/or password. All fields optional — send only what's changing.
+**Request (name/phone):** `{ "name": "New Name", "phone": "9999999999" }`
+**Request (password change):** `{ "currentPassword": "old", "newPassword": "new" }`
+**Response (200):** updated user object.
+**Errors:** `400` if changing password without `currentPassword`; `401` if `currentPassword` wrong.
 
-**Request (name/phone only):**
-```json
-{ "name": "New Name", "phone": "9999999999" }
-```
-**Request (changing password too):**
-```json
-{ "currentPassword": "old_password", "newPassword": "new_password" }
-```
-**Response (200):**
-```json
-{ "id": "uuid", "email": "...", "name": "...", "phone": "...", "role": "CUSTOMER" }
-```
-**Errors:** `400` if changing password without `currentPassword`; `401` if `currentPassword` is wrong.
-
----
+### `DELETE /api/auth/me` *(auth required)*
+Deletes the account. This **anonymizes** the account (clears email/name/phone/password, sets an internal `deletedAt` flag) rather than removing the row — existing order history is preserved for business records, but the account can never log in again.
+**Response (200):** `{ "message": "Account deleted" }`
 
 ### `GET /api/auth/google`
-Redirects to Google's OAuth consent screen. Link a "Continue with Google" button directly to this URL — no fetch/AJAX needed, just navigate the browser here.
+Redirects to Google's OAuth consent screen. Link a button directly to this URL.
 
 ### `GET /api/auth/google/callback`
-Handled entirely by the backend. After Google login, redirects the browser to:
-```
-{FRONTEND_URL}/auth/callback?token=<jwt_token>
-```
-**Frontend must have a `/auth/callback` page** that reads the `token` query param, stores it the same way normal login does, then redirects to the homepage.
+Backend-handled. Redirects to `{FRONTEND_URL}/auth/callback?token=<jwt>`. Frontend needs a `/auth/callback` page that reads `token`, stores it like normal login, redirects home.
 
 ---
 
 ## Auth — Forgot Password
 
 ### `POST /api/auth/forgot-password`
-Sends a 6-digit reset code to the given email (only if an account with that email exists).
-
-**Request:**
-```json
-{ "email": "user@example.com" }
-```
-**Response (200):**
-```json
-{ "message": "Reset code sent" }
-```
+**Request:** `{ "email": "user@example.com" }`
+**Response (200):** `{ "message": "Reset code sent" }`
 **Errors:** `404` if no account exists with that email.
 
----
-
 ### `POST /api/auth/reset-password`
-Verifies the reset code and sets a new password.
-
-**Request:**
-```json
-{ "email": "user@example.com", "otp": "123456", "newPassword": "new_password" }
-```
-**Response (200):**
-```json
-{ "message": "Password reset successful" }
-```
+**Request:** `{ "email": "user@example.com", "otp": "123456", "newPassword": "new_password" }`
+**Response (200):** `{ "message": "Password reset successful" }`
 **Errors:** `400` if code invalid or expired.
 
 ---
@@ -145,9 +81,10 @@ Verifies the reset code and sets a new password.
 
 ### `GET /api/categories`
 **Response:** array of `{ id, name, slug }`
+**Use `id` (not `slug`) whenever a `categoryId` field is required elsewhere** (e.g. creating a product).
 
 ### `GET /api/products`
-Query params (optional): `?category=<slug>` `&search=<text>`
+Query params (all optional): `?category=<slug>` `&subcategory=<text>` `&search=<text>`
 **Response:** array of product objects:
 ```json
 {
@@ -160,33 +97,31 @@ Query params (optional): `?category=<slug>` `&search=<text>`
   "stock": 50,
   "imageUrls": [],
   "attributes": { "author": "...", "language": "..." },
+  "subcategory": "Islamic Studies",
   "categoryId": "uuid",
   "category": { "id": "uuid", "name": "Books", "slug": "books" }
 }
 ```
-`attributes` shape varies by category (books: author/language; attars: volume_ml/scent_notes; clothing: fabric/sizes_available) — render dynamically.
+**Important:** there are no dedicated top-level `sizes` or `colors` fields. For clothing/apparel categories, sizes live at `attributes.sizes_available` (an array of strings, e.g. `["S","M","L","XL"]`). There is currently no color-variant data anywhere — don't build against a `colors` field yet.
+
+`attributes` shape varies by category: books → `author`/`language`; attars → `volume_ml`/`scent_notes`; clothing → `fabric`/`sizes_available`. Render dynamically based on category.
+
+### `GET /api/products/subcategories?category=<slug>`
+Returns the distinct subcategory strings that actually exist for a given category, e.g. `["Hadith","Islamic Studies"]`. Use this to build filter tabs dynamically rather than hardcoding them.
 
 ### `GET /api/products/:slug`
-Single product, same shape as above. `404` if not found.
+Single product by **slug** (not the database `id`). Same shape as above. `404` if not found.
 
 ---
 
 ## Checkout *(auth required)*
 
 ### `POST /api/checkout/create-order`
-Creates a Razorpay order. Does **not** touch the database yet.
-**Request:**
-```json
-{ "items": [{ "productId": "uuid", "quantity": 1 }] }
-```
-**Response:**
-```json
-{ "razorpayOrderId": "order_xxx", "amount": 1599, "keyId": "rzp_test_xxx" }
-```
-Use `razorpayOrderId`, `amount`, `keyId` to open Razorpay's checkout widget (`amount` is in paise).
+**Request:** `{ "items": [{ "productId": "uuid", "quantity": 1 }] }`
+**Response:** `{ "razorpayOrderId": "order_xxx", "amount": 1599, "keyId": "rzp_test_xxx" }` (`amount` in paise)
 
 ### `POST /api/checkout/verify`
-Call this from Razorpay's `handler` callback after payment. Verifies the payment signature server-side, then creates the real order and decrements stock.
+Call from Razorpay's `handler` callback after payment.
 **Request:**
 ```json
 {
@@ -197,48 +132,55 @@ Call this from Razorpay's `handler` callback after payment. Verifies the payment
   "shippingAddress": "full address as a single string"
 }
 ```
-Pass the three `razorpay_*` fields exactly as Razorpay's widget returns them in its response object — do not rename or restructure them.
-
+Pass the three `razorpay_*` fields exactly as Razorpay's widget returns them.
 **Response (200):** the created order object, including `items`.
-**Errors:** `400` — either `"Payment verification failed"` (signature mismatch) or a stock-related message.
+**Errors:** `400` — `"Payment verification failed"` (signature mismatch) or a stock-related message.
 
 ---
 
 ## Orders *(auth required)*
 
 ### `GET /api/orders`
-Returns the logged-in user's own order history.
-**Response:** array of orders, each with `items` (including nested `product`).
+Logged-in user's own order history, each with `items` (including nested `product`) and `trackingNumber` (null until shipped).
 
 ### `GET /api/orders/:id`
-Single order by ID — for an order confirmation/detail page. Returns `403` if the order belongs to a different user (unless requester is `ADMIN`), `404` if not found.
+Single order by ID. `403` if it belongs to a different user (unless `ADMIN`), `404` if not found.
 
 ---
 
 ## Admin *(auth + ADMIN role required)*
 
-All routes below return `403` if the logged-in user's role isn't `ADMIN`.
-
 ### `GET /api/admin/products` — all products
 ### `POST /api/admin/products` — create
 ```json
-{ "name": "...", "description": "...", "price": 15.99, "originalPrice": null, "stock": 50, "categoryId": "uuid", "imageUrls": [], "attributes": {} }
+{
+  "name": "...", "description": "...", "price": 15.99, "originalPrice": null,
+  "stock": 50, "categoryId": "uuid-from-GET-categories", "subcategory": "Hadith",
+  "imageUrls": [], "attributes": {}
+}
 ```
-### `PUT /api/admin/products/:id` — update (same body shape as create, `slug` unchanged)
+**`categoryId` must be the real UUID from `GET /api/categories`, not the slug.**
+
+### `PUT /api/admin/products/:id` — update (same shape, `slug` unchanged)
 ### `DELETE /api/admin/products/:id` — delete
 
 ### `POST /api/admin/upload-image`
-`multipart/form-data`, field name `image`. Returns `{ "url": "https://..." }` — use this URL in `imageUrls` when creating/editing a product.
+`multipart/form-data`, field name `image`. Returns `{ "url": "https://..." }`.
 
 ### `GET /api/admin/orders` — all orders, any customer
 ### `PUT /api/admin/orders/:id`
 ```json
-{ "status": "SHIPPED" }
+{ "status": "SHIPPED", "trackingNumber": "RXXXXXXXXXIN" }
 ```
-Valid values: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`.
+Both fields optional — send only what's changing. Valid `status` values: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`.
+
+---
+
+## Payment methods & other frontend-only concerns
+There is **no backend API for saved payment methods**. Storing only non-sensitive display data (last-4 digits, card type, UPI handle) client-side, never full card numbers or CVV/PIN, is the correct approach — do not build a backend endpoint for this.
 
 ---
 
 ## Notes
 - This document is the source of truth. If something here doesn't match actual backend behavior, that's a bug to report — not a signal to guess a workaround.
-- Last updated: reflects backend as of forgot-password, account-update, and order-by-id additions.
+- Updated same-day with every backend change going forward.

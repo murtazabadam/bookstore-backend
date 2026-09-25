@@ -186,7 +186,7 @@ app.post('/api/auth/verify-signup', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !user.password) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!user || !user.password || user.deletedAt) return res.status(401).json({ error: 'Invalid credentials' });
 
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
@@ -282,6 +282,20 @@ app.post('/api/auth/reset-password', async (req, res) => {
   await prisma.emailOtp.delete({ where: { email } }).catch(() => {});
 
   res.json({ message: 'Password reset successful' });
+});
+
+app.delete('/api/auth/me', requireAuth, async (req, res) => {
+  await prisma.user.update({
+    where: { id: req.user.userId },
+    data: {
+      email: `deleted-${req.user.userId}@deleted.local`,
+      name: 'Deleted User',
+      phone: null,
+      password: null,
+      deletedAt: new Date(),
+    },
+  });
+  res.json({ message: 'Account deleted' });
 });
 
 // ── Admin: Products ──────────────────────────────────────────

@@ -22,15 +22,16 @@ enum OrderStatus {
 }
 
 model User {
-  id            String   @id @default(uuid())
-  email         String   @unique
+  id            String    @id @default(uuid())
+  email         String    @unique
   password      String?
   name          String
   phone         String?
-  role          Role     @default(CUSTOMER)
-  emailVerified Boolean  @default(false)
+  role          Role      @default(CUSTOMER)
+  emailVerified Boolean   @default(false)
+  deletedAt     DateTime?
   orders        Order[]
-  createdAt     DateTime @default(now())
+  createdAt     DateTime  @default(now())
 }
 
 model EmailOtp {

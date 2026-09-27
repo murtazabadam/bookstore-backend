@@ -52,8 +52,18 @@ Updates name, phone, and/or password. All fields optional — send only what's c
 **Errors:** `400` if changing password without `currentPassword`; `401` if `currentPassword` wrong.
 
 ### `DELETE /api/auth/me` *(auth required)*
-Deletes the account. This **anonymizes** the account (clears email/name/phone/password, sets an internal `deletedAt` flag) rather than removing the row — existing order history is preserved for business records, but the account can never log in again.
+Deletes the account. This **anonymizes** the account (clears email/name/phone/password, sets an internal `deletedAt` flag) rather than removing the row — existing order history is preserved for business records, but the account can never log in again. **The auth token used is also immediately invalidated** — any further request with that token returns `401`.
+
+**Request body:**
+- If the account has a password set: `{ "currentPassword": "..." }` — **required**.
+- If the account is Google-only (no password): no body needed, or send `{}`.
+
 **Response (200):** `{ "message": "Account deleted" }`
+**Errors:**
+- `400 { "error": "Current password required to delete account" }` — password account, no `currentPassword` sent.
+- `401 { "error": "Current password is incorrect" }` — wrong password.
+
+**Frontend should still clear localStorage and redirect after a successful delete** — don't rely solely on the backend-side token invalidation for UX.
 
 ### `GET /api/auth/google`
 Redirects to Google's OAuth consent screen. Link a button directly to this URL.
@@ -183,4 +193,4 @@ There is **no backend API for saved payment methods**. Storing only non-sensitiv
 
 ## Notes
 - This document is the source of truth. If something here doesn't match actual backend behavior, that's a bug to report — not a signal to guess a workaround.
-- Updated same-day with every backend change going forward.
+- Updated same-day with every backend change going forward, without needing to be asked.

@@ -195,13 +195,18 @@ app.post('/api/auth/login', async (req, res) => {
   res.json({ token, user: { id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role } });
 });
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'No token provided' });
 
   const token = authHeader.split(' ')[1];
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    if (!user || user.deletedAt) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    req.user = decoded;
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });
@@ -285,6 +290,15 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 app.delete('/api/auth/me', requireAuth, async (req, res) => {
+  const { currentPassword } = req.body;
+  const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
+
+  if (user.password) {
+    if (!currentPassword) return res.status(400).json({ error: 'Current password required to delete account' });
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+
   await prisma.user.update({
     where: { id: req.user.userId },
     data: {

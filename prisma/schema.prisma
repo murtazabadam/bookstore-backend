@@ -31,7 +31,40 @@ model User {
   emailVerified Boolean   @default(false)
   deletedAt     DateTime?
   orders        Order[]
+  addresses     Address[]
   createdAt     DateTime  @default(now())
+}
+
+model Address {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  label     String?
+  fullName  String
+  phone     String
+  street    String
+  area      String?
+  city      String
+  state     String
+  pincode   String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Address {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  label     String?
+  fullName  String
+  phone     String
+  street    String
+  area      String?
+  city      String
+  state     String
+  pincode   String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
 }
 
 model EmailOtp {

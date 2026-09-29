@@ -15,13 +15,11 @@ Authorization: Bearer <token>
 ## Auth — Signup
 
 ### `POST /api/auth/send-otp`
-Sends a 6-digit verification code to the given email (via Brevo).
 **Request:** `{ "email": "user@example.com" }`
 **Response (200):** `{ "message": "OTP sent" }`
 **Errors:** `400` if email already registered and verified.
 
 ### `POST /api/auth/verify-signup`
-Verifies the OTP and creates (or completes) the account.
 **Request:**
 ```json
 { "name": "Full Name", "email": "user@example.com", "phone": "9876543210", "password": "plaintext_password", "otp": "123456" }
@@ -45,31 +43,23 @@ Verifies the OTP and creates (or completes) the account.
 **Response (200):** `{ "id": "uuid", "email": "...", "name": "...", "phone": "...", "role": "CUSTOMER" }`
 
 ### `PUT /api/auth/me` *(auth required)*
-Updates name, phone, and/or password. All fields optional — send only what's changing.
 **Request (name/phone):** `{ "name": "New Name", "phone": "9999999999" }`
 **Request (password change):** `{ "currentPassword": "old", "newPassword": "new" }`
 **Response (200):** updated user object.
 **Errors:** `400` if changing password without `currentPassword`; `401` if `currentPassword` wrong.
 
 ### `DELETE /api/auth/me` *(auth required)*
-Deletes the account. This **anonymizes** the account (clears email/name/phone/password, sets an internal `deletedAt` flag) rather than removing the row — existing order history is preserved for business records, but the account can never log in again. **The auth token used is also immediately invalidated** — any further request with that token returns `401`.
-
-**Request body:**
-- If the account has a password set: `{ "currentPassword": "..." }` — **required**.
-- If the account is Google-only (no password): no body needed, or send `{}`.
-
+Anonymizes the account (clears email/name/phone/password, sets `deletedAt`) rather than deleting the row — order history is preserved. **Token is invalidated immediately.**
+**Request body:** `{ "currentPassword": "..." }` — required if the account has a password; omit for Google-only accounts.
 **Response (200):** `{ "message": "Account deleted" }`
-**Errors:**
-- `400 { "error": "Current password required to delete account" }` — password account, no `currentPassword` sent.
-- `401 { "error": "Current password is incorrect" }` — wrong password.
-
-**Frontend should still clear localStorage and redirect after a successful delete** — don't rely solely on the backend-side token invalidation for UX.
+**Errors:** `400` missing password on a password account; `401` wrong password.
+**Frontend should still clear localStorage and redirect after success.**
 
 ### `GET /api/auth/google`
-Redirects to Google's OAuth consent screen. Link a button directly to this URL.
+Redirects to Google's OAuth consent screen.
 
 ### `GET /api/auth/google/callback`
-Backend-handled. Redirects to `{FRONTEND_URL}/auth/callback?token=<jwt>`. Frontend needs a `/auth/callback` page that reads `token`, stores it like normal login, redirects home.
+Redirects to `{FRONTEND_URL}/auth/callback?token=<jwt>`.
 
 ---
 
@@ -87,15 +77,58 @@ Backend-handled. Redirects to `{FRONTEND_URL}/auth/callback?token=<jwt>`. Fronte
 
 ---
 
+## Addresses *(auth required, all routes)*
+
+Saved delivery addresses, scoped to the logged-in user. A user's own addresses only — never another user's, enforced with `403` on any cross-user access attempt.
+
+### `GET /api/addresses`
+**Response:** array of:
+```json
+{
+  "id": "uuid",
+  "label": "Home",
+  "fullName": "...",
+  "phone": "...",
+  "street": "...",
+  "area": "...",
+  "city": "...",
+  "state": "...",
+  "pincode": "...",
+  "isDefault": true
+}
+```
+
+### `POST /api/addresses`
+**Request:** same shape as above, minus `id`/`isDefault`. The **first** address a user creates is automatically set as `isDefault: true`; subsequent ones default to `false` unless explicitly promoted.
+**Response:** the created address object.
+
+### `PUT /api/addresses/:id`
+Same body shape as `POST` (partial updates supported — send only changed fields, though `undefined` fields will overwrite with `undefined` in the current implementation, so send the full object to be safe).
+**Response:** the updated address object.
+**Errors:** `404` not found; `403` if it belongs to a different user.
+
+### `DELETE /api/addresses/:id`
+Deletes the address. If it was the default and other addresses remain, the oldest remaining one is automatically promoted to default.
+**Response:** `{ "success": true }`
+**Errors:** `404` not found; `403` if it belongs to a different user.
+
+### `PUT /api/addresses/:id/default`
+Sets this address as the user's default, unsetting any previous default.
+**Response:** the now-default address object.
+**Errors:** `404` not found; `403` if it belongs to a different user.
+
+**Note on checkout:** `shippingAddress` on an `Order` is a plain string, captured at the moment `/api/checkout/verify` is called — completely independent of the address book. Editing or deleting a saved address afterward never changes what's shown on past orders. The frontend is responsible for formatting the selected saved address into a single string before sending it to checkout.
+
+---
+
 ## Products & Categories *(public, no auth)*
 
 ### `GET /api/categories`
-**Response:** array of `{ id, name, slug }`
-**Use `id` (not `slug`) whenever a `categoryId` field is required elsewhere** (e.g. creating a product).
+**Response:** array of `{ id, name, slug }`. Use `id` (not `slug`) for `categoryId` fields elsewhere.
 
 ### `GET /api/products`
-Query params (all optional): `?category=<slug>` `&subcategory=<text>` `&search=<text>`
-**Response:** array of product objects:
+Query params (optional): `?category=<slug>` `&subcategory=<text>` `&search=<text>`
+**Response:** array of:
 ```json
 {
   "id": "uuid",
@@ -112,15 +145,13 @@ Query params (all optional): `?category=<slug>` `&subcategory=<text>` `&search=<
   "category": { "id": "uuid", "name": "Books", "slug": "books" }
 }
 ```
-**Important:** there are no dedicated top-level `sizes` or `colors` fields. For clothing/apparel categories, sizes live at `attributes.sizes_available` (an array of strings, e.g. `["S","M","L","XL"]`). There is currently no color-variant data anywhere — don't build against a `colors` field yet.
-
-`attributes` shape varies by category: books → `author`/`language`; attars → `volume_ml`/`scent_notes`; clothing → `fabric`/`sizes_available`. Render dynamically based on category.
+No dedicated `sizes`/`colors` fields — clothing sizes live at `attributes.sizes_available`. No color-variant data exists yet.
 
 ### `GET /api/products/subcategories?category=<slug>`
-Returns the distinct subcategory strings that actually exist for a given category, e.g. `["Hadith","Islamic Studies"]`. Use this to build filter tabs dynamically rather than hardcoding them.
+Returns distinct subcategory strings for that category, e.g. `["Hadith","Islamic Studies"]`.
 
 ### `GET /api/products/:slug`
-Single product by **slug** (not the database `id`). Same shape as above. `404` if not found.
+Single product by **slug**. `404` if not found.
 
 ---
 
@@ -128,10 +159,9 @@ Single product by **slug** (not the database `id`). Same shape as above. `404` i
 
 ### `POST /api/checkout/create-order`
 **Request:** `{ "items": [{ "productId": "uuid", "quantity": 1 }] }`
-**Response:** `{ "razorpayOrderId": "order_xxx", "amount": 1599, "keyId": "rzp_test_xxx" }` (`amount` in paise)
+**Response:** `{ "razorpayOrderId": "order_xxx", "amount": 1599, "keyId": "rzp_test_xxx" }`
 
 ### `POST /api/checkout/verify`
-Call from Razorpay's `handler` callback after payment.
 **Request:**
 ```json
 {
@@ -142,55 +172,48 @@ Call from Razorpay's `handler` callback after payment.
   "shippingAddress": "full address as a single string"
 }
 ```
-Pass the three `razorpay_*` fields exactly as Razorpay's widget returns them.
 **Response (200):** the created order object, including `items`.
-**Errors:** `400` — `"Payment verification failed"` (signature mismatch) or a stock-related message.
+**Errors:** `400` payment verification failed or stock issue.
 
 ---
 
 ## Orders *(auth required)*
 
 ### `GET /api/orders`
-Logged-in user's own order history, each with `items` (including nested `product`) and `trackingNumber` (null until shipped).
+Own order history, with `items`, `trackingNumber` (null until shipped), `shippingAddress`.
 
 ### `GET /api/orders/:id`
-Single order by ID. `403` if it belongs to a different user (unless `ADMIN`), `404` if not found.
+Single order. `403`/`404` as appropriate.
 
 ---
 
 ## Admin *(auth + ADMIN role required)*
 
 ### `GET /api/admin/products` — all products
-### `POST /api/admin/products` — create
+### `POST /api/admin/products`
 ```json
-{
-  "name": "...", "description": "...", "price": 15.99, "originalPrice": null,
-  "stock": 50, "categoryId": "uuid-from-GET-categories", "subcategory": "Hadith",
-  "imageUrls": [], "attributes": {}
-}
+{ "name": "...", "description": "...", "price": 15.99, "originalPrice": null, "stock": 50, "categoryId": "uuid-from-GET-categories", "subcategory": "Hadith", "imageUrls": [], "attributes": {} }
 ```
-**`categoryId` must be the real UUID from `GET /api/categories`, not the slug.**
-
-### `PUT /api/admin/products/:id` — update (same shape, `slug` unchanged)
-### `DELETE /api/admin/products/:id` — delete
+### `PUT /api/admin/products/:id` — same shape, `slug` unchanged
+### `DELETE /api/admin/products/:id`
 
 ### `POST /api/admin/upload-image`
-`multipart/form-data`, field name `image`. Returns `{ "url": "https://..." }`.
+`multipart/form-data`, field `image`. Returns `{ "url": "https://..." }`.
 
 ### `GET /api/admin/orders` — all orders, any customer
 ### `PUT /api/admin/orders/:id`
 ```json
 { "status": "SHIPPED", "trackingNumber": "RXXXXXXXXXIN" }
 ```
-Both fields optional — send only what's changing. Valid `status` values: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`.
+Valid `status`: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`.
 
 ---
 
-## Payment methods & other frontend-only concerns
-There is **no backend API for saved payment methods**. Storing only non-sensitive display data (last-4 digits, card type, UPI handle) client-side, never full card numbers or CVV/PIN, is the correct approach — do not build a backend endpoint for this.
+## Payment methods
+No backend API — frontend stores only non-sensitive display data (last-4, card type, UPI handle) locally. Correct approach; no endpoint needed.
 
 ---
 
 ## Notes
-- This document is the source of truth. If something here doesn't match actual backend behavior, that's a bug to report — not a signal to guess a workaround.
-- Updated same-day with every backend change going forward, without needing to be asked.
+- Source of truth. Mismatches are bugs to report, not workarounds to guess.
+- Updated same-day with every backend change, automatically.

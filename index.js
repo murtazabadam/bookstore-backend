@@ -312,6 +312,75 @@ app.delete('/api/auth/me', requireAuth, async (req, res) => {
   res.json({ message: 'Account deleted' });
 });
 
+// ── Addresses ────────────────────────────────────────────────
+app.get('/api/addresses', requireAuth, async (req, res) => {
+  const addresses = await prisma.address.findMany({
+    where: { userId: req.user.userId },
+    orderBy: { createdAt: 'asc' },
+  });
+  res.json(addresses);
+});
+
+app.post('/api/addresses', requireAuth, async (req, res) => {
+  const { label, fullName, phone, street, area, city, state, pincode } = req.body;
+  const count = await prisma.address.count({ where: { userId: req.user.userId } });
+  const address = await prisma.address.create({
+    data: {
+      userId: req.user.userId,
+      label, fullName, phone, street, area, city, state, pincode,
+      isDefault: count === 0,
+    },
+  });
+  res.json(address);
+});
+
+app.put('/api/addresses/:id', requireAuth, async (req, res) => {
+  const existing = await prisma.address.findUnique({ where: { id: req.params.id } });
+  if (!existing) return res.status(404).json({ error: 'Address not found' });
+  if (existing.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+
+  const { label, fullName, phone, street, area, city, state, pincode } = req.body;
+  const address = await prisma.address.update({
+    where: { id: req.params.id },
+    data: { label, fullName, phone, street, area, city, state, pincode },
+  });
+  res.json(address);
+});
+
+app.delete('/api/addresses/:id', requireAuth, async (req, res) => {
+  const existing = await prisma.address.findUnique({ where: { id: req.params.id } });
+  if (!existing) return res.status(404).json({ error: 'Address not found' });
+  if (existing.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+
+  await prisma.address.delete({ where: { id: req.params.id } });
+
+  if (existing.isDefault) {
+    const remaining = await prisma.address.findFirst({
+      where: { userId: req.user.userId },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (remaining) {
+      await prisma.address.update({ where: { id: remaining.id }, data: { isDefault: true } });
+    }
+  }
+
+  res.json({ success: true });
+});
+
+app.put('/api/addresses/:id/default', requireAuth, async (req, res) => {
+  const existing = await prisma.address.findUnique({ where: { id: req.params.id } });
+  if (!existing) return res.status(404).json({ error: 'Address not found' });
+  if (existing.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+
+  await prisma.$transaction([
+    prisma.address.updateMany({ where: { userId: req.user.userId }, data: { isDefault: false } }),
+    prisma.address.update({ where: { id: req.params.id }, data: { isDefault: true } }),
+  ]);
+
+  const updated = await prisma.address.findUnique({ where: { id: req.params.id } });
+  res.json(updated);
+});
+
 // ── Admin: Products ──────────────────────────────────────────
 app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('image'), async (req, res) => {
   try {

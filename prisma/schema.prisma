@@ -29,10 +29,21 @@ model User {
   phone         String?
   role          Role      @default(CUSTOMER)
   emailVerified Boolean   @default(false)
+  isActive      Boolean   @default(true)
   deletedAt     DateTime?
   orders        Order[]
   addresses     Address[]
   createdAt     DateTime  @default(now())
+}
+
+model StoreSettings {
+  id           String   @id @default("singleton")
+  storeName    String   @default("Maktabah Islamiyah")
+  supportEmail String?
+  supportPhone String?
+  address      String?
+  shippingInfo String?
+  updatedAt    DateTime @updatedAt
 }
 
 model Address {

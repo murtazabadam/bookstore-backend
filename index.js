@@ -186,7 +186,9 @@ app.post('/api/auth/verify-signup', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !user.password || user.deletedAt) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!user || !user.password || user.deletedAt || !user.isActive) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
@@ -203,7 +205,7 @@ async function requireAuth(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
-    if (!user || user.deletedAt) {
+    if (!user || user.deletedAt || !user.isActive) {
       return res.status(401).json({ error: 'Invalid token' });
     }
     req.user = decoded;
@@ -222,6 +224,7 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
   res.json({ id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role });
 });
+
 app.put('/api/auth/me', requireAuth, async (req, res) => {
   const { name, phone, currentPassword, newPassword } = req.body;
   const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
@@ -252,6 +255,7 @@ app.get('/api/auth/google/callback',
     res.redirect(`${process.env.FRONTEND_URL}/auth/callback?token=${token}`);
   }
 );
+
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
@@ -381,6 +385,77 @@ app.put('/api/addresses/:id/default', requireAuth, async (req, res) => {
   res.json(updated);
 });
 
+// ── Admin: Users ─────────────────────────────────────────────
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  const users = await prisma.user.findMany({
+    where: { deletedAt: null },
+    select: { id: true, name: true, email: true, phone: true, createdAt: true, isActive: true, role: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(users);
+});
+
+app.put('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { isActive } = req.body;
+  try {
+    const user = await prisma.user.update({
+      where: { id: req.params.id },
+      data: { isActive },
+      select: { id: true, name: true, email: true, phone: true, createdAt: true, isActive: true, role: true },
+    });
+    res.json(user);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── Admin: Categories ────────────────────────────────────────
+app.post('/api/admin/categories', requireAuth, requireAdmin, async (req, res) => {
+  const { name, slug } = req.body;
+  try {
+    const category = await prisma.category.create({ data: { name, slug } });
+    res.json(category);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { name, slug } = req.body;
+  try {
+    const category = await prisma.category.update({ where: { id: req.params.id }, data: { name, slug } });
+    res.json(category);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res) => {
+  const count = await prisma.product.count({ where: { categoryId: req.params.id } });
+  if (count > 0) {
+    return res.status(409).json({ error: `Cannot delete — ${count} product(s) still use this category` });
+  }
+  await prisma.category.delete({ where: { id: req.params.id } });
+  res.json({ success: true });
+});
+
+// ── Admin: Settings ──────────────────────────────────────────
+app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
+  let settings = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
+  if (!settings) settings = await prisma.storeSettings.create({ data: { id: 'singleton' } });
+  res.json(settings);
+});
+
+app.put('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
+  const { storeName, supportEmail, supportPhone, address, shippingInfo } = req.body;
+  const settings = await prisma.storeSettings.upsert({
+    where: { id: 'singleton' },
+    update: { storeName, supportEmail, supportPhone, address, shippingInfo },
+    create: { id: 'singleton', storeName, supportEmail, supportPhone, address, shippingInfo },
+  });
+  res.json(settings);
+});
+
 // ── Admin: Products ──────────────────────────────────────────
 app.post('/api/admin/upload-image', requireAuth, requireAdmin, upload.single('image'), async (req, res) => {
   try {
@@ -405,6 +480,15 @@ app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   res.json(products);
 });
 
+app.get('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
+  const product = await prisma.product.findUnique({
+    where: { id: req.params.id },
+    include: { category: true },
+  });
+  if (!product) return res.status(404).json({ error: 'Product not found' });
+  res.json(product);
+});
+
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   const { name, description, price, originalPrice, stock, categoryId, subcategory, imageUrls, attributes } = req.body;
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -426,11 +510,17 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, subcategory, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, categoryId, subcategory, imageUrls, attributes } = req.body;
   try {
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data: { name, description, price, originalPrice: originalPrice || null, stock, subcategory: subcategory || null, imageUrls, attributes },
+      data: {
+        name, description, price,
+        originalPrice: originalPrice || null,
+        stock, categoryId,
+        subcategory: subcategory || null,
+        imageUrls, attributes,
+      },
     });
     res.json(product);
   } catch (err) {
@@ -446,7 +536,10 @@ app.delete('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res
 // ── Admin: Orders ────────────────────────────────────────────
 app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
   const orders = await prisma.order.findMany({
-    include: { items: { include: { product: true } }, user: true },
+    include: {
+      items: { include: { product: true } },
+      user: { select: { id: true, name: true, email: true, phone: true } },
+    },
     orderBy: { createdAt: 'desc' },
   });
   res.json(orders);
@@ -470,6 +563,7 @@ app.get('/api/orders', requireAuth, async (req, res) => {
   });
   res.json(orders);
 });
+
 app.get('/api/orders/:id', requireAuth, async (req, res) => {
   const order = await prisma.order.findUnique({
     where: { id: req.params.id },

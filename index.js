@@ -12,6 +12,8 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const session = require('express-session');
 
+const rateLimit = require('express-rate-limit');
+
 const app = express();
 const prisma = new PrismaClient();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -21,7 +23,22 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-app.use(cors());
+const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000'].filter(Boolean);
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+}));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many attempts. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use(express.json());
 
 app.use(session({
@@ -83,6 +100,23 @@ async function sendOtpEmail(email, code) {
   }
 }
 
+async function calculateOrderTotal(items) {
+  const settings = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
+  const freeThreshold = settings ? Number(settings.freeShippingThreshold) : 0;
+  const shippingCharge = settings ? Number(settings.shippingCharge) : 0;
+
+  let subtotal = 0;
+  for (const item of items) {
+    const product = await prisma.product.findUnique({ where: { id: item.productId } });
+    if (!product) throw new Error(`Product not found: ${item.productId}`);
+    if (product.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name}`);
+    subtotal += Number(product.price) * item.quantity;
+  }
+
+  const appliedShipping = (freeThreshold > 0 && subtotal >= freeThreshold) ? 0 : shippingCharge;
+  return { subtotal, shippingCharge: appliedShipping, total: subtotal + appliedShipping };
+}
+
 // ── Health check ─────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Bookstore API running' });
@@ -90,8 +124,19 @@ app.get('/', (req, res) => {
 
 // ── Categories & Products (public) ──────────────────────────
 app.get('/api/categories', async (req, res) => {
-  const categories = await prisma.category.findMany();
+  const categories = await prisma.category.findMany({ where: { isActive: true } });
   res.json(categories);
+});
+
+app.get('/api/settings', async (req, res) => {
+  const s = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
+  if (!s) return res.json({});
+  res.json({
+    storeName: s.storeName, tagline: s.tagline, storeEmail: s.storeEmail,
+    phone: s.phone, address: s.address, logoUrl: s.logoUrl,
+    shippingCharge: s.shippingCharge, freeShippingThreshold: s.freeShippingThreshold,
+    deliveryEstimate: s.deliveryEstimate,
+  });
 });
 
 app.get('/api/products', async (req, res) => {
@@ -127,7 +172,7 @@ app.get('/api/products/:slug', async (req, res) => {
 });
 
 // ── Auth: Signup with email OTP ──────────────────────────────
-app.post('/api/auth/send-otp', async (req, res) => {
+app.post('/api/auth/send-otp', authLimiter, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
 
@@ -183,7 +228,7 @@ app.post('/api/auth/verify-signup', async (req, res) => {
 });
 
 // ── Auth: Login ───────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
   const { email, password } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user || !user.password || user.deletedAt || !user.isActive) {
@@ -256,7 +301,7 @@ app.get('/api/auth/google/callback',
   }
 );
 
-app.post('/api/auth/forgot-password', async (req, res) => {
+app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   const { email } = req.body;
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) return res.status(404).json({ error: 'No account found with this email' });
@@ -441,19 +486,37 @@ app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, r
 
 // ── Admin: Settings ──────────────────────────────────────────
 app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
-  let settings = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
-  if (!settings) settings = await prisma.storeSettings.create({ data: { id: 'singleton' } });
-  res.json(settings);
+  let s = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
+  if (!s) s = await prisma.storeSettings.create({ data: { id: 'singleton' } });
+
+  res.json({
+    general: { storeName: s.storeName, tagline: s.tagline, storeEmail: s.storeEmail, phone: s.phone, address: s.address, logoUrl: s.logoUrl },
+    payment: {
+      onlinePaymentsEnabled: s.onlinePaymentsEnabled,
+      codEnabled: s.codEnabled,
+      mode: process.env.RAZORPAY_KEY_ID?.startsWith('rzp_live_') ? 'live' : 'test',
+      razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+      secretsConfigured: !!process.env.RAZORPAY_KEY_SECRET,
+    },
+    shipping: { shippingCharge: s.shippingCharge, freeShippingThreshold: s.freeShippingThreshold, deliveryEstimate: s.deliveryEstimate, courierName: s.courierName, trackingUrlTemplate: s.trackingUrlTemplate },
+    email: { senderName: s.senderName, replyToEmail: s.replyToEmail, adminAlertEmail: s.adminAlertEmail, lowStockThreshold: s.lowStockThreshold },
+  });
 });
 
 app.put('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
-  const { storeName, supportEmail, supportPhone, address, shippingInfo } = req.body;
-  const settings = await prisma.storeSettings.upsert({
-    where: { id: 'singleton' },
-    update: { storeName, supportEmail, supportPhone, address, shippingInfo },
-    create: { id: 'singleton', storeName, supportEmail, supportPhone, address, shippingInfo },
-  });
-  res.json(settings);
+  const { general = {}, shipping = {}, email = {}, payment = {} } = req.body;
+  const data = {};
+  ['storeName', 'tagline', 'storeEmail', 'phone', 'address', 'logoUrl'].forEach(k => { if (general[k] !== undefined) data[k] = general[k]; });
+  ['shippingCharge', 'freeShippingThreshold', 'deliveryEstimate', 'courierName', 'trackingUrlTemplate'].forEach(k => { if (shipping[k] !== undefined) data[k] = shipping[k]; });
+  ['senderName', 'replyToEmail', 'adminAlertEmail', 'lowStockThreshold'].forEach(k => { if (email[k] !== undefined) data[k] = email[k]; });
+  ['onlinePaymentsEnabled', 'codEnabled'].forEach(k => { if (payment[k] !== undefined) data[k] = payment[k]; });
+
+  try {
+    const s = await prisma.storeSettings.upsert({ where: { id: 'singleton' }, update: data, create: { id: 'singleton', ...data } });
+    res.json({ message: 'Settings updated' });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ── Admin: Products ──────────────────────────────────────────
@@ -547,11 +610,74 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
 
 app.put('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) => {
   const { status, trackingNumber } = req.body;
-  const updateData = {};
-  if (status) updateData.status = status;
-  if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
-  const order = await prisma.order.update({ where: { id: req.params.id }, data: updateData });
-  res.json(order);
+  try {
+    const existing = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
+    if (!existing) return res.status(404).json({ error: 'Order not found' });
+
+    const updateData = {};
+    if (status) updateData.status = status;
+    if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
+
+    if (status === 'CANCELLED' && existing.status !== 'CANCELLED') {
+      await prisma.$transaction([
+        ...existing.items.map(item =>
+          prisma.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } })
+        ),
+        prisma.order.update({ where: { id: req.params.id }, data: updateData }),
+      ]);
+    } else {
+      await prisma.order.update({ where: { id: req.params.id }, data: updateData });
+    }
+
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    res.json(order);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/categories', requireAuth, requireAdmin, async (req, res) => {
+  const categories = await prisma.category.findMany({
+    include: { _count: { select: { products: true } } },
+  });
+  res.json(categories.map(c => ({ ...c, productCount: c._count.products, _count: undefined })));
+});
+
+app.post('/api/admin/categories', requireAuth, requireAdmin, async (req, res) => {
+  const { name, slug, imageUrl, isActive } = req.body;
+  const finalSlug = slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  try {
+    const category = await prisma.category.create({
+      data: { name, slug: finalSlug, imageUrl: imageUrl || null, isActive: isActive !== undefined ? isActive : true },
+    });
+    res.json(category);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { name, slug, imageUrl, isActive } = req.body;
+  const data = {};
+  if (name !== undefined) data.name = name;
+  if (slug !== undefined) data.slug = slug;
+  if (imageUrl !== undefined) data.imageUrl = imageUrl;
+  if (isActive !== undefined) data.isActive = isActive;
+  try {
+    const category = await prisma.category.update({ where: { id: req.params.id }, data });
+    res.json(category);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res) => {
+  const count = await prisma.product.count({ where: { categoryId: req.params.id } });
+  if (count > 0) {
+    return res.status(409).json({ error: `Cannot delete — ${count} product(s) still use this category` });
+  }
+  await prisma.category.delete({ where: { id: req.params.id } });
+  res.json({ success: true });
 });
 
 // ── Customer: Order history ─────────────────────────────────
@@ -580,26 +706,17 @@ app.get('/api/orders/:id', requireAuth, async (req, res) => {
 app.post('/api/checkout/create-order', requireAuth, async (req, res) => {
   const { items } = req.body;
   try {
-    let total = 0;
-    for (const item of items) {
-      const product = await prisma.product.findUnique({ where: { id: item.productId } });
-      if (!product) throw new Error(`Product not found: ${item.productId}`);
-      if (product.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name}`);
-      total += Number(product.price) * item.quantity;
-    }
-
+    const { total } = await calculateOrderTotal(items);
     const razorpayOrder = await razorpay.orders.create({
       amount: Math.round(total * 100),
       currency: 'INR',
       receipt: `receipt_${Date.now()}`,
     });
-
     res.json({ razorpayOrderId: razorpayOrder.id, amount: razorpayOrder.amount, keyId: process.env.RAZORPAY_KEY_ID });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
-
 app.post('/api/checkout/verify', requireAuth, async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature, items, shippingAddress } = req.body;
 
@@ -613,16 +730,15 @@ app.post('/api/checkout/verify', requireAuth, async (req, res) => {
   }
 
   try {
-    const order = await prisma.$transaction(async (tx) => {
-      let total = 0;
-      const orderItemsData = [];
+    const { shippingCharge, total } = await calculateOrderTotal(items);
 
+    const order = await prisma.$transaction(async (tx) => {
+      const orderItemsData = [];
       for (const item of items) {
         const product = await tx.product.findUnique({ where: { id: item.productId } });
         if (!product || product.stock < item.quantity) {
           throw new Error(`Stock issue with product ${item.productId}`);
         }
-        total += Number(product.price) * item.quantity;
         orderItemsData.push({
           productId: product.id,
           quantity: item.quantity,
@@ -633,7 +749,11 @@ app.post('/api/checkout/verify', requireAuth, async (req, res) => {
       }
 
       return tx.order.create({
-        data: { userId: req.user.userId, total, shippingAddress, status: 'PAID', items: { create: orderItemsData } },
+        data: {
+          userId: req.user.userId, total, shippingCharge, shippingAddress,
+          razorpayPaymentId: razorpay_payment_id,
+          status: 'PAID', items: { create: orderItemsData },
+        },
         include: { items: true },
       });
     });

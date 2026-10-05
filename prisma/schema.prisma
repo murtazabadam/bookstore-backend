@@ -36,16 +36,6 @@ model User {
   createdAt     DateTime  @default(now())
 }
 
-model StoreSettings {
-  id           String   @id @default("singleton")
-  storeName    String   @default("Maktabah Islamiyah")
-  supportEmail String?
-  supportPhone String?
-  address      String?
-  shippingInfo String?
-  updatedAt    DateTime @updatedAt
-}
-
 model Address {
   id        String   @id @default(uuid())
   userId    String
@@ -73,7 +63,45 @@ model Category {
   id       String    @id @default(uuid())
   name     String
   slug     String    @unique
+  imageUrl String?
+  isActive Boolean   @default(true)
   products Product[]
+}
+
+model StoreSettings {
+  id                    String   @id @default("singleton")
+  storeName             String   @default("Maktabah Islamiyah")
+  tagline               String?
+  storeEmail            String?
+  phone                 String?
+  address               String?
+  logoUrl               String?
+  onlinePaymentsEnabled Boolean  @default(true)
+  codEnabled            Boolean  @default(false)
+  shippingCharge        Decimal  @default(0) @db.Decimal(10, 2)
+  freeShippingThreshold Decimal  @default(0) @db.Decimal(10, 2)
+  deliveryEstimate      String?
+  courierName           String?
+  trackingUrlTemplate   String?
+  senderName            String?
+  replyToEmail          String?
+  adminAlertEmail       String?
+  lowStockThreshold     Int      @default(10)
+  updatedAt             DateTime @updatedAt
+}
+
+model Order {
+  id                String      @id @default(uuid())
+  userId            String
+  user              User        @relation(fields: [userId], references: [id])
+  status            OrderStatus @default(PENDING)
+  total             Decimal     @db.Decimal(10, 2)
+  shippingCharge    Decimal     @default(0) @db.Decimal(10, 2)
+  shippingAddress   String
+  trackingNumber    String?
+  razorpayPaymentId String?
+  items             OrderItem[]
+  createdAt         DateTime    @default(now())
 }
 
 model Product {
@@ -92,18 +120,6 @@ model Product {
   orderItems    OrderItem[]
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
-}
-
-model Order {
-  id              String      @id @default(uuid())
-  userId          String
-  user            User        @relation(fields: [userId], references: [id])
-  status          OrderStatus @default(PENDING)
-  total           Decimal     @db.Decimal(10, 2)
-  shippingAddress String
-  trackingNumber  String?
-  items           OrderItem[]
-  createdAt       DateTime    @default(now())
 }
 
 model OrderItem {

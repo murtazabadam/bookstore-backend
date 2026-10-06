@@ -454,36 +454,6 @@ app.put('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// ── Admin: Categories ────────────────────────────────────────
-app.post('/api/admin/categories', requireAuth, requireAdmin, async (req, res) => {
-  const { name, slug } = req.body;
-  try {
-    const category = await prisma.category.create({ data: { name, slug } });
-    res.json(category);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-app.put('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { name, slug } = req.body;
-  try {
-    const category = await prisma.category.update({ where: { id: req.params.id }, data: { name, slug } });
-    res.json(category);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res) => {
-  const count = await prisma.product.count({ where: { categoryId: req.params.id } });
-  if (count > 0) {
-    return res.status(409).json({ error: `Cannot delete — ${count} product(s) still use this category` });
-  }
-  await prisma.category.delete({ where: { id: req.params.id } });
-  res.json({ success: true });
-});
-
 // ── Admin: Settings ──────────────────────────────────────────
 app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
   let s = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });

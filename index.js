@@ -83,6 +83,10 @@ passport.deserializeUser(async (id, done) => {
 
 // ── Email sending via Brevo ─────────────────────────────────
 async function sendOtpEmail(email, code) {
+  const settings = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
+  const senderName = settings?.senderName || process.env.BREVO_SENDER_NAME;
+  const replyTo = settings?.replyToEmail;
+
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
@@ -91,8 +95,9 @@ async function sendOtpEmail(email, code) {
       'Accept': 'application/json',
     },
     body: JSON.stringify({
-      sender: { name: process.env.BREVO_SENDER_NAME, email: process.env.BREVO_SENDER_EMAIL },
+      sender: { name: senderName, email: process.env.BREVO_SENDER_EMAIL },
       to: [{ email }],
+      ...(replyTo && { replyTo: { email: replyTo } }),
       subject: 'Verify your email - Maktabah Islamiyah',
       htmlContent: `<p>Your verification code is <strong>${code}</strong>. It expires in 10 minutes.</p><p>If you didn't request this, you can ignore this email.</p>`,
     }),
@@ -102,7 +107,6 @@ async function sendOtpEmail(email, code) {
     throw new Error(`Brevo error: ${errText}`);
   }
 }
-
 async function resolveItemPricing(item) {
   const product = await prisma.product.findUnique({
     where: { id: item.productId },
@@ -171,7 +175,8 @@ app.get('/api/products', async (req, res) => {
   const { category, subcategory, search } = req.query;
   const products = await prisma.product.findMany({
     where: {
-      ...(category && { category: { slug: category } }),
+      category: { isActive: true },
+      ...(category && { category: { slug: category, isActive: true } }),
       ...(subcategory && { subcategory }),
       ...(search && { name: { contains: search, mode: 'insensitive' } }),
     },
@@ -180,22 +185,12 @@ app.get('/api/products', async (req, res) => {
   res.json(products);
 });
 
-app.get('/api/products/subcategories', async (req, res) => {
-  const { category } = req.query;
-  const products = await prisma.product.findMany({
-    where: { subcategory: { not: null }, ...(category && { category: { slug: category } }) },
-    select: { subcategory: true },
-    distinct: ['subcategory'],
-  });
-  res.json(products.map(p => p.subcategory));
-});
-
 app.get('/api/products/:slug', async (req, res) => {
   const product = await prisma.product.findUnique({
     where: { slug: req.params.slug },
     include: { category: true },
   });
-  if (!product) return res.status(404).json({ error: 'Product not found' });
+  if (!product || !product.category.isActive) return res.status(404).json({ error: 'Product not found' });
   res.json(product);
 });
 
@@ -483,11 +478,8 @@ app.put('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // ── Admin: Settings ──────────────────────────────────────────
-app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
-  let s = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
-  if (!s) s = await prisma.storeSettings.create({ data: { id: 'singleton' } });
-
-  res.json({
+function formatSettings(s) {
+  return {
     general: { storeName: s.storeName, tagline: s.tagline, storeEmail: s.storeEmail, phone: s.phone, address: s.address, logoUrl: s.logoUrl },
     payment: {
       onlinePaymentsEnabled: s.onlinePaymentsEnabled,
@@ -497,8 +489,14 @@ app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
       secretsConfigured: !!process.env.RAZORPAY_KEY_SECRET,
     },
     shipping: { shippingCharge: s.shippingCharge, freeShippingThreshold: s.freeShippingThreshold, deliveryEstimate: s.deliveryEstimate, courierName: s.courierName, trackingUrlTemplate: s.trackingUrlTemplate },
-    email: { senderName: s.senderName, replyToEmail: s.replyToEmail, adminAlertEmail: s.adminAlertEmail, lowStockThreshold: s.lowStockThreshold },
-  });
+    email: { senderName: s.senderName, replyToEmail: s.replyToEmail, lowStockThreshold: s.lowStockThreshold },
+  };
+}
+
+app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
+  let s = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
+  if (!s) s = await prisma.storeSettings.create({ data: { id: 'singleton' } });
+  res.json(formatSettings(s));
 });
 
 app.put('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
@@ -506,12 +504,12 @@ app.put('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
   const data = {};
   ['storeName', 'tagline', 'storeEmail', 'phone', 'address', 'logoUrl'].forEach(k => { if (general[k] !== undefined) data[k] = general[k]; });
   ['shippingCharge', 'freeShippingThreshold', 'deliveryEstimate', 'courierName', 'trackingUrlTemplate'].forEach(k => { if (shipping[k] !== undefined) data[k] = shipping[k]; });
-  ['senderName', 'replyToEmail', 'adminAlertEmail', 'lowStockThreshold'].forEach(k => { if (email[k] !== undefined) data[k] = email[k]; });
+  ['senderName', 'replyToEmail', 'lowStockThreshold'].forEach(k => { if (email[k] !== undefined) data[k] = email[k]; });
   ['onlinePaymentsEnabled', 'codEnabled'].forEach(k => { if (payment[k] !== undefined) data[k] = payment[k]; });
 
   try {
     const s = await prisma.storeSettings.upsert({ where: { id: 'singleton' }, update: data, create: { id: 'singleton', ...data } });
-    res.json({ message: 'Settings updated' });
+    res.json(formatSettings(s));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

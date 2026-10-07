@@ -23,14 +23,17 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000'].filter(Boolean);
+const frontendUrls = (process.env.FRONTEND_URL || 'http://localhost:3000')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const allowedOrigins = [...new Set([...frontendUrls, 'http://localhost:3000'])];
+const primaryFrontendUrl = frontendUrls[0];
+
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   },
 }));
-
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -100,6 +103,28 @@ async function sendOtpEmail(email, code) {
   }
 }
 
+async function resolveItemPricing(item) {
+  const product = await prisma.product.findUnique({
+    where: { id: item.productId },
+    include: { variants: true },
+  });
+  if (!product) throw new Error(`Product not found: ${item.productId}`);
+
+  if (product.variants && product.variants.length > 0) {
+    const vi = item.variantInfo || {};
+    const variant = product.variants.find(
+      v => (v.size || null) === (vi.size || null) && (v.color || null) === (vi.color || null)
+    );
+    if (!variant) throw new Error(`Variant not found for ${product.name} (size: ${vi.size || '-'}, color: ${vi.color || '-'})`);
+    if (variant.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name} (${vi.size || ''} ${vi.color || ''})`);
+    const price = variant.price != null ? Number(variant.price) : Number(product.price);
+    return { product, variant, price };
+  }
+
+  if (product.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name}`);
+  return { product, variant: null, price: Number(product.price) };
+}
+
 async function calculateOrderTotal(items) {
   const settings = await prisma.storeSettings.findUnique({ where: { id: 'singleton' } });
   const freeThreshold = settings ? Number(settings.freeShippingThreshold) : 0;
@@ -107,14 +132,17 @@ async function calculateOrderTotal(items) {
 
   let subtotal = 0;
   for (const item of items) {
-    const product = await prisma.product.findUnique({ where: { id: item.productId } });
-    if (!product) throw new Error(`Product not found: ${item.productId}`);
-    if (product.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name}`);
-    subtotal += Number(product.price) * item.quantity;
+    const { price } = await resolveItemPricing(item);
+    subtotal += price * item.quantity;
   }
 
   const appliedShipping = (freeThreshold > 0 && subtotal >= freeThreshold) ? 0 : shippingCharge;
   return { subtotal, shippingCharge: appliedShipping, total: subtotal + appliedShipping };
+}
+
+async function syncProductStockFromVariants(productId) {
+  const agg = await prisma.productVariant.aggregate({ where: { productId }, _sum: { stock: true } });
+  await prisma.product.update({ where: { id: productId }, data: { stock: agg._sum.stock || 0 } });
 }
 
 // ── Health check ─────────────────────────────────────────────
@@ -297,7 +325,7 @@ app.get('/api/auth/google/callback',
   passport.authenticate('google', { session: false, failureRedirect: '/login' }),
   (req, res) => {
     const token = jwt.sign({ userId: req.user.id, role: req.user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${process.env.FRONTEND_URL}/auth/callback?token=${token}`);
+   res.redirect(`${primaryFrontendUrl}/auth/callback?token=${token}`);
   }
 );
 
@@ -523,19 +551,27 @@ app.get('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) =
 });
 
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, categoryId, subcategory, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, categoryId, subcategory, brand, sku, status, featured, imageUrls, attributes, variants } = req.body;
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   try {
     const product = await prisma.product.create({
       data: {
         name, slug, description, price,
         originalPrice: originalPrice || null,
-        stock, categoryId,
+        stock: stock || 0, categoryId,
         subcategory: subcategory || null,
+        brand: brand || null,
+        sku: sku || null,
+        status: status || 'ACTIVE',
+        featured: !!featured,
         imageUrls: imageUrls || [],
         attributes: attributes || {},
+        ...(variants && variants.length > 0 && {
+          variants: { create: variants.map(v => ({ size: v.size || null, color: v.color || null, sku: v.sku || null, price: v.price || null, stock: v.stock || 0 })) },
+        }),
       },
     });
+    if (variants && variants.length > 0) await syncProductStockFromVariants(product.id);
     res.json(product);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -543,8 +579,17 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, categoryId, subcategory, imageUrls, attributes } = req.body;
+  const { name, description, price, originalPrice, stock, categoryId, subcategory, brand, sku, status, featured, imageUrls, attributes, variants } = req.body;
   try {
+    if (variants) {
+      await prisma.productVariant.deleteMany({ where: { productId: req.params.id } });
+      if (variants.length > 0) {
+        await prisma.productVariant.createMany({
+          data: variants.map(v => ({ productId: req.params.id, size: v.size || null, color: v.color || null, sku: v.sku || null, price: v.price || null, stock: v.stock || 0 })),
+        });
+      }
+    }
+
     const product = await prisma.product.update({
       where: { id: req.params.id },
       data: {
@@ -552,9 +597,14 @@ app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) =
         originalPrice: originalPrice || null,
         stock, categoryId,
         subcategory: subcategory || null,
+        brand: brand || null,
+        sku: sku || null,
+        status: status || undefined,
+        featured: featured !== undefined ? !!featured : undefined,
         imageUrls, attributes,
       },
     });
+    if (variants && variants.length > 0) await syncProductStockFromVariants(req.params.id);
     res.json(product);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -584,22 +634,29 @@ app.put('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) => 
     const existing = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
     if (!existing) return res.status(404).json({ error: 'Order not found' });
 
+    if (existing.status === 'CANCELLED' && status && status !== 'CANCELLED') {
+      return res.status(400).json({ error: 'Cannot change the status of a cancelled order' });
+    }
+
     const updateData = {};
     if (status) updateData.status = status;
     if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
 
     if (status === 'CANCELLED' && existing.status !== 'CANCELLED') {
-      await prisma.$transaction([
-        ...existing.items.map(item =>
-          prisma.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } })
-        ),
-        prisma.order.update({ where: { id: req.params.id }, data: updateData }),
-      ]);
-    } else {
-      await prisma.order.update({ where: { id: req.params.id }, data: updateData });
+      for (const item of existing.items) {
+        const product = await prisma.product.findUnique({ where: { id: item.productId }, include: { variants: true } });
+        const vi = item.variantInfo || {};
+        const variant = product.variants.find(v => (v.size || null) === (vi.size || null) && (v.color || null) === (vi.color || null));
+        if (variant) {
+          await prisma.productVariant.update({ where: { id: variant.id }, data: { stock: { increment: item.quantity } } });
+          await syncProductStockFromVariants(item.productId);
+        } else {
+          await prisma.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } });
+        }
+      }
     }
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    const order = await prisma.order.update({ where: { id: req.params.id }, data: updateData });
     res.json(order);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -705,17 +762,20 @@ app.post('/api/checkout/verify', requireAuth, async (req, res) => {
     const order = await prisma.$transaction(async (tx) => {
       const orderItemsData = [];
       for (const item of items) {
-        const product = await tx.product.findUnique({ where: { id: item.productId } });
-        if (!product || product.stock < item.quantity) {
-          throw new Error(`Stock issue with product ${item.productId}`);
+        const { price, variant } = await resolveItemPricing(item);
+
+        if (variant) {
+          await tx.productVariant.update({ where: { id: variant.id }, data: { stock: { decrement: item.quantity } } });
+        } else {
+          await tx.product.update({ where: { id: item.productId }, data: { stock: { decrement: item.quantity } } });
         }
+
         orderItemsData.push({
-          productId: product.id,
+          productId: item.productId,
           quantity: item.quantity,
           variantInfo: item.variantInfo || {},
-          priceAtPurchase: product.price,
+          priceAtPurchase: price,
         });
-        await tx.product.update({ where: { id: product.id }, data: { stock: { decrement: item.quantity } } });
       }
 
       return tx.order.create({
@@ -727,6 +787,11 @@ app.post('/api/checkout/verify', requireAuth, async (req, res) => {
         include: { items: true },
       });
     });
+
+    for (const item of items) {
+      const product = await prisma.product.findUnique({ where: { id: item.productId }, include: { variants: true } });
+      if (product.variants.length > 0) await syncProductStockFromVariants(item.productId);
+    }
 
     res.json(order);
   } catch (err) {

@@ -13,6 +13,23 @@ enum Role {
   ADMIN
 }
 
+enum ProductStatus {
+  ACTIVE
+  DRAFT
+  OUT_OF_STOCK
+}
+
+model ProductVariant {
+  id        String   @id @default(uuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  size      String?
+  color     String?
+  sku       String?  @unique
+  price     Decimal? @db.Decimal(10, 2)
+  stock     Int      @default(0)
+}
+
 enum OrderStatus {
   PENDING
   PAID
@@ -105,21 +122,26 @@ model Order {
 }
 
 model Product {
-  id            String      @id @default(uuid())
+  id            String           @id @default(uuid())
   name          String
-  slug          String      @unique
+  slug          String           @unique
   description   String
-  price         Decimal     @db.Decimal(10, 2)
-  originalPrice Decimal?    @db.Decimal(10, 2)
-  stock         Int         @default(0)
+  price         Decimal          @db.Decimal(10, 2)
+  originalPrice Decimal?         @db.Decimal(10, 2)
+  stock         Int              @default(0)
   imageUrls     String[]
-  attributes    Json        @default("{}")
+  attributes    Json             @default("{}")
   categoryId    String
   subcategory   String?
-  category      Category    @relation(fields: [categoryId], references: [id])
+  brand         String?
+  sku           String?          @unique
+  status        ProductStatus    @default(ACTIVE)
+  featured      Boolean          @default(false)
+  category      Category         @relation(fields: [categoryId], references: [id])
+  variants      ProductVariant[]
   orderItems    OrderItem[]
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
 }
 
 model OrderItem {

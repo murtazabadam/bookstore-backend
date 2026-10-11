@@ -3,7 +3,7 @@
 Base URL (production): `https://bookstore-backend-bnpf.onrender.com`
 Base URL (local dev): `http://localhost:5000`
 
-**CORS:** `FRONTEND_URL` on Render accepts several addresses, comma-separated (e.g. `https://shop.vercel.app,https://mydomain.com`); `http://localhost:3000` is always allowed too. Google login redirects to the **first** address in the list.
+**CORS:** `FRONTEND_URL` on Render accepts several addresses, comma-separated (e.g. `https://shop.vercel.app,https://mydomain.com`; a trailing `/` is tolerated, but use `https://` and the exact address people open — Vercel *preview* URLs are not allowed); `http://localhost:3000` is always allowed too. Google login redirects to the **first** address in the list.
 
 All request/response bodies are JSON. Authenticated routes require:
 ```
@@ -135,7 +135,7 @@ Switching a category off hides the category **and all its products** from every 
 
 ### `GET /api/products`
 Query params (optional): `?category=<slug>` `&subcategory=<text>` `&search=<text>` `&featured=true`
-Products with `status: DRAFT` are never returned. `OUT_OF_STOCK` products are returned. **Response:** array of:
+Products with `status: DRAFT` are never returned. `OUT_OF_STOCK` products are returned. **Response:** array of (note: `price`, `originalPrice` and variant `price` are **strings** like `"1499.00"` — convert with `Number()` before doing maths):
 ```json
 {
   "id": "uuid",
@@ -188,7 +188,7 @@ The server prices the cart itself and remembers it against the Razorpay order id
 
 ### `POST /api/checkout/create-order`
 **Request:** `{ "items": [{ "productId": "uuid", "quantity": 1, "variantInfo": { "size": "M", "color": null } }] }`
-`variantInfo` is required when the product has variants (size/color must match a variant exactly). Quantity must be a whole number 1–100. Duplicate lines for the same product + size + color are merged before the stock check.
+`variantInfo` is required when the product has variants: `size` and `color` must match a variant exactly, and `null`/missing/`""` all mean "no size" / "no color" (so `color: null` matches a variant that has no color). The matching variant's own `price` is used (falls back to the product price when the variant price is empty). For products **without** variants, `variantInfo` is just stored on the order line and does not affect price or stock. Quantity must be a whole number 1–100. Duplicate lines for the same product + size + color are merged before the stock check.
 **Response:**
 ```json
 {
@@ -201,7 +201,7 @@ The server prices the cart itself and remembers it against the Razorpay order id
 }
 ```
 `amount` is in paise (`total × 100`). `subtotal` / `shippingCharge` / `total` are in rupees and use the shipping rules from store settings, so the frontend can show exactly what will be charged.
-**Errors:** `400` empty cart, bad quantity, product unavailable/not ACTIVE, variant not found, insufficient stock, total under ₹1; `502` Razorpay could not create the order.
+**Errors** (all `{ "error": ... }`): `400` empty cart, bad quantity, `"<name> is not available for purchase"` (not ACTIVE), `"Variant not found for <name> (size: M, color: -)"`, `"Insufficient stock for <name> (M Black)"`, total under ₹1; `503` online payments switched off in settings; `502` Razorpay could not create the order.
 
 ### `POST /api/checkout/verify`
 **Request:**
@@ -277,8 +277,14 @@ Single order. `404` not found; `403` if it belongs to another user (admins may v
 ```
 - `status`: `ACTIVE` | `DRAFT` | `OUT_OF_STOCK`. Only `ACTIVE` products can be bought; `DRAFT` is hidden from the store.
 - `slug` is generated from `name` on create and **never changes** on update.
-- **Variants:** on `PUT`, sending a `variants` array **replaces all variants** for that product; omit the key to leave them untouched. If the product has ≥1 variant, `stock` is set to the **sum of variant stock** (the `stock` you send is ignored). Variant `sku` must be unique.
+- **`POST` requires** `name`, `categoryId` and `price` (number ≥ 0) → otherwise `400 { "error": "name is required" }` etc. `brand`, `sku`, `subcategory`, `originalPrice`, `description`, `imageUrls`, `attributes`, `status`, `featured`, `variants` are all optional; `originalPrice: null` is fine.
+- **`PUT` is a true partial update:** only the fields present in the body change. `{ "stock": 12 }` changes stock and nothing else; `{ "variants": [...] }` changes variants and nothing else. To **clear** `subcategory`, `brand`, `sku` or `originalPrice`, send `""` or `null` for that field. `stock` must be a whole number ≥ 0.
+- **Variants:** on `PUT`, sending a `variants` array **replaces all variants** for that product in one atomic step (full list, **no `id` needed** — ids are regenerated each save, so never store a variant id; carts and orders match by `size` + `color`). If anything in the list is invalid (duplicate `sku`, negative stock) the whole update is rejected and the old variants stay as they were. Omit the key to leave variants untouched; `variants: []` removes all variants.
+- If a product has ≥1 variant, its `stock` is **always the sum of variant stock** — a `stock` you send for such a product is ignored.
+- Variant fields: `size`, `color`, `sku` (optional, unique), `price` (`null` = use product price), `stock` (whole number ≥ 0).
+- **Response** of `POST` and `PUT` is the saved product **including `variants`**. `PUT` on an unknown id → `404 { "error": "Product not found" }`.
 - Duplicate `sku`/`slug` → `400 { "error": "Another record already uses that sku" }`.
+- `GET /api/admin/products` (the list) does **not** include variants; use `GET /api/admin/products/:id` to load them.
 `DELETE /api/admin/products/:id` — `409 { "error": "This product appears in past orders and cannot be deleted. Set its status to DRAFT to hide it instead." }` if it was ever ordered; otherwise deletes the product and its variants → `{ "success": true }`.
 
 ### `POST /api/admin/upload-image`

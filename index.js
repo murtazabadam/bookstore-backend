@@ -25,7 +25,7 @@ const razorpay = new Razorpay({
 });
 
 const frontendUrls = (process.env.FRONTEND_URL || 'http://localhost:3000')
-  .split(',').map(s => s.trim()).filter(Boolean);
+  .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
 const allowedOrigins = [...new Set([...frontendUrls, 'http://localhost:3000'])];
 const primaryFrontendUrl = frontendUrls[0];
 
@@ -678,63 +678,114 @@ app.get('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) =
   res.json(product);
 });
 
+class ProductInputError extends Error {}
+
+function cleanVariants(variants) {
+  if (!Array.isArray(variants)) throw new ProductInputError('variants must be a list');
+  return variants.map(v => {
+    const stock = v && v.stock !== undefined && v.stock !== null && v.stock !== '' ? Number(v.stock) : 0;
+    if (!Number.isInteger(stock) || stock < 0) throw new ProductInputError('Variant stock must be a whole number, 0 or more');
+    let price = null;
+    if (v && v.price !== undefined && v.price !== null && v.price !== '') {
+      price = Number(v.price);
+      if (!Number.isFinite(price) || price < 0) throw new ProductInputError('Variant price must be a number, 0 or more');
+    }
+    return { size: (v && v.size) || null, color: (v && v.color) || null, sku: (v && v.sku) || null, price, stock };
+  });
+}
+
+function checkPrice(value, label) {
+  const n = Number(value);
+  if (value === undefined || value === null || value === '' || !Number.isFinite(n) || n < 0) {
+    throw new ProductInputError(`${label} must be a number, 0 or more`);
+  }
+}
+
+// Stock of a product that has variants is always the sum of its variants.
+async function syncStockInTx(tx, productId) {
+  const count = await tx.productVariant.count({ where: { productId } });
+  if (count === 0) return;
+  const agg = await tx.productVariant.aggregate({ where: { productId }, _sum: { stock: true } });
+  await tx.product.update({ where: { id: productId }, data: { stock: agg._sum.stock || 0 } });
+}
+
 app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, categoryId, subcategory, brand, sku, status, featured, imageUrls, attributes, variants } = req.body;
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   try {
-    const product = await prisma.product.create({
-      data: {
-        name, slug, description, price,
-        originalPrice: originalPrice || null,
-        stock: stock || 0, categoryId,
-        subcategory: subcategory || null,
-        brand: brand || null,
-        sku: sku || null,
-        status: status || 'ACTIVE',
-        featured: !!featured,
-        imageUrls: imageUrls || [],
-        attributes: attributes || {},
-        ...(variants && variants.length > 0 && {
-          variants: { create: variants.map(v => ({ size: v.size || null, color: v.color || null, sku: v.sku || null, price: v.price || null, stock: v.stock || 0 })) },
-        }),
-      },
+    const { name, description, price, originalPrice, stock, categoryId, subcategory, brand, sku, status, featured, imageUrls, attributes, variants } = req.body || {};
+    if (typeof name !== 'string' || !name.trim()) throw new ProductInputError('name is required');
+    if (typeof categoryId !== 'string' || !categoryId) throw new ProductInputError('categoryId is required');
+    checkPrice(price, 'price');
+    const cleaned = variants && variants.length > 0 ? cleanVariants(variants) : [];
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+    const product = await prisma.$transaction(async (tx) => {
+      const created = await tx.product.create({
+        data: {
+          name: name.trim(), slug, description: description || '', price,
+          originalPrice: originalPrice || null,
+          stock: stock || 0, categoryId,
+          subcategory: subcategory || null,
+          brand: brand || null,
+          sku: sku || null,
+          status: status || 'ACTIVE',
+          featured: !!featured,
+          imageUrls: imageUrls || [],
+          attributes: attributes || {},
+          ...(cleaned.length > 0 && { variants: { create: cleaned } }),
+        },
+      });
+      await syncStockInTx(tx, created.id);
+      return tx.product.findUnique({ where: { id: created.id }, include: { variants: true } });
     });
-    if (variants && variants.length > 0) await syncProductStockFromVariants(product.id);
     res.json(product);
   } catch (err) {
+    if (err instanceof ProductInputError) return res.status(400).json({ error: err.message });
     res.status(400).json({ error: friendlyError(err) });
   }
 });
 
+// Partial update: only fields present in the body are changed.
+// "" / null clears subcategory, brand, sku, originalPrice. `variants` (full list, ids not needed)
+// replaces all variants atomically; omit it to leave variants alone.
 app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { name, description, price, originalPrice, stock, categoryId, subcategory, brand, sku, status, featured, imageUrls, attributes, variants } = req.body;
   try {
-    if (variants) {
-      await prisma.productVariant.deleteMany({ where: { productId: req.params.id } });
-      if (variants.length > 0) {
-        await prisma.productVariant.createMany({
-          data: variants.map(v => ({ productId: req.params.id, size: v.size || null, color: v.color || null, sku: v.sku || null, price: v.price || null, stock: v.stock || 0 })),
-        });
-      }
-    }
+    const b = req.body || {};
+    const has = k => b[k] !== undefined;
+    const data = {};
 
-    const product = await prisma.product.update({
-      where: { id: req.params.id },
-      data: {
-        name, description, price,
-        originalPrice: originalPrice || null,
-        stock, categoryId,
-        subcategory: subcategory || null,
-        brand: brand || null,
-        sku: sku || null,
-        status: status || undefined,
-        featured: featured !== undefined ? !!featured : undefined,
-        imageUrls, attributes,
-      },
+    if (has('name')) {
+      if (typeof b.name !== 'string' || !b.name.trim()) throw new ProductInputError('name cannot be empty');
+      data.name = b.name.trim();
+    }
+    if (has('price')) { checkPrice(b.price, 'price'); data.price = b.price; }
+    if (has('stock')) {
+      const n = Number(b.stock);
+      if (b.stock === null || b.stock === '' || !Number.isInteger(n) || n < 0) throw new ProductInputError('stock must be a whole number, 0 or more');
+      data.stock = n;
+    }
+    for (const k of ['description', 'categoryId', 'imageUrls', 'attributes']) if (has(k)) data[k] = b[k];
+    for (const k of ['subcategory', 'brand', 'sku', 'originalPrice']) if (has(k)) data[k] = b[k] || null;
+    if (b.status) data.status = b.status;
+    if (has('featured')) data.featured = !!b.featured;
+
+    const variantsGiven = has('variants');
+    const cleaned = variantsGiven ? cleanVariants(b.variants) : null;
+
+    const product = await prisma.$transaction(async (tx) => {
+      if (variantsGiven) {
+        await tx.productVariant.deleteMany({ where: { productId: req.params.id } });
+        if (cleaned.length > 0) {
+          await tx.productVariant.createMany({ data: cleaned.map(v => ({ ...v, productId: req.params.id })) });
+        }
+      }
+      await tx.product.update({ where: { id: req.params.id }, data });
+      await syncStockInTx(tx, req.params.id);
+      return tx.product.findUnique({ where: { id: req.params.id }, include: { variants: true } });
     });
-    if (variants && variants.length > 0) await syncProductStockFromVariants(req.params.id);
     res.json(product);
   } catch (err) {
+    if (err instanceof ProductInputError) return res.status(400).json({ error: err.message });
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Product not found' });
     res.status(400).json({ error: friendlyError(err) });
   }
 });

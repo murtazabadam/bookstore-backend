@@ -116,9 +116,27 @@ model Order {
   shippingCharge    Decimal     @default(0) @db.Decimal(10, 2)
   shippingAddress   String
   trackingNumber    String?
-  razorpayPaymentId String?
+  razorpayOrderId   String?     @unique
+  razorpayPaymentId String?     @unique
   items             OrderItem[]
   createdAt         DateTime    @default(now())
+}
+
+// What the server priced at /checkout/create-order, keyed by the Razorpay order.
+// /checkout/verify trusts this record, never the items the browser sends back.
+model CheckoutSession {
+  id              String    @id @default(uuid())
+  razorpayOrderId String    @unique
+  userId          String
+  items           Json
+  subtotal        Decimal   @db.Decimal(10, 2)
+  shippingCharge  Decimal   @db.Decimal(10, 2)
+  total           Decimal   @db.Decimal(10, 2)
+  amountPaise     Int
+  consumedAt      DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([userId])
 }
 
 model Product {

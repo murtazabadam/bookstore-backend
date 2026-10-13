@@ -122,6 +122,20 @@ model Order {
   createdAt         DateTime    @default(now())
 }
 
+// Cart and wishlist saved per user so they follow the customer across devices.
+// No relation to User/Product on purpose: a deleted product must never break these rows.
+model UserCart {
+  userId    String   @id
+  items     Json     @default("[]")
+  updatedAt DateTime @updatedAt
+}
+
+model UserWishlist {
+  userId     String   @id
+  productIds String[]
+  updatedAt  DateTime @updatedAt
+}
+
 // What the server priced at /checkout/create-order, keyed by the Razorpay order.
 // /checkout/verify trusts this record, never the items the browser sends back.
 model CheckoutSession {

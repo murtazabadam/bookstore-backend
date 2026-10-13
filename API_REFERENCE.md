@@ -259,6 +259,49 @@ Single order. `404` not found; `403` if it belongs to another user (admins may v
 
 ---
 
+## Cart & Wishlist *(auth required)*
+
+Saved per user so they follow the customer from laptop to phone. The frontend keeps its local copy for guests; after login it merges local + server lists and sends the result with `PUT`. **`PUT` replaces the whole list** (last write wins — if two devices save at the same moment, the later save is kept).
+
+### `GET /api/cart`
+Returns the saved cart **checked against the live catalogue** with the same rules as checkout (product ACTIVE, category active, matching size/color variant, stock). Nothing is deleted on read.
+```json
+{
+  "items": [
+    { "productId": "uuid", "size": "M", "color": "Black", "quantity": 2,
+      "name": "Men's Shalwar Kameez", "slug": "mens-shalwar-kameez", "imageUrl": "https://...",
+      "price": 1499, "stock": 3, "available": true, "adjusted": false },
+    { "productId": "uuid", "size": null, "color": null, "quantity": 5,
+      "name": "Attar Oud", "slug": "attar-oud", "imageUrl": "https://...",
+      "price": 300, "stock": 2, "available": true, "adjusted": true },
+    { "productId": "uuid", "size": "XL", "color": null, "quantity": 1,
+      "name": "Men's Shalwar Kameez", "available": false,
+      "reason": "Men's Shalwar Kameez is no longer available in that size/colour" }
+  ]
+}
+```
+- `price` is a **number in rupees** (the variant's own price, or the product price when the variant has none).
+- `quantity` is already **reduced to the available stock**; `adjusted: true` means it was reduced (tell the customer).
+- `available: false` + `reason` (a message you can show) when the product was deleted, is DRAFT/OUT_OF_STOCK, its category is switched off, the size/colour no longer exists, or stock is 0. Those lines stay saved; remove them with the next `PUT`.
+- `size` / `color` are `null` when the product has none.
+
+### `PUT /api/cart`
+**Request:** `{ "items": [{ "productId": "uuid", "size": "M", "color": null, "quantity": 2 }] }` (a bare array is accepted too). Empty list clears the cart.
+Duplicate lines (same product + size + color) are merged by adding quantities. Stock is **not** enforced when saving; the response and `GET` report it, and checkout enforces it.
+**Response:** same shape as `GET` (the freshly saved cart, checked).
+**Errors:** `400` not a list, a line without `productId`, quantity not a whole number 1–100, more than 50 different lines.
+
+### `GET /api/wishlist`
+**Response:** `{ "productIds": ["uuid", "uuid"] }` — saved order, only products that are currently visible in the store (DRAFT, deleted and inactive-category products are left out; a product that becomes visible again reappears).
+
+### `PUT /api/wishlist`
+**Request:** `{ "productIds": ["uuid", "uuid"] }` (a bare array is accepted too). Duplicates are removed; empty list clears it. **Response:** same as `GET`.
+**Errors:** `400` not a list of strings, or more than 200 products.
+
+Deleting an account (`DELETE /api/auth/me`) also deletes its saved cart and wishlist.
+
+---
+
 ## Admin *(auth + ADMIN role required, every route)*
 
 ### Products

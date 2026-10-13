@@ -423,6 +423,8 @@ app.delete('/api/auth/me', requireAuth, async (req, res) => {
       deletedAt: new Date(),
     },
   });
+  await prisma.userCart.deleteMany({ where: { userId: req.user.userId } });
+  await prisma.userWishlist.deleteMany({ where: { userId: req.user.userId } });
   res.json({ message: 'Account deleted' });
 });
 
@@ -493,6 +495,125 @@ app.put('/api/addresses/:id/default', requireAuth, async (req, res) => {
 
   const updated = await prisma.address.findUnique({ where: { id: req.params.id } });
   res.json(updated);
+});
+
+// ── Cart & Wishlist (saved per user, so they follow the customer across devices) ──
+const CART_MAX_LINES = 50;
+const WISHLIST_MAX = 200;
+
+function parseCartBody(body) {
+  const list = Array.isArray(body) ? body : body && body.items;
+  if (!Array.isArray(list)) throw new CheckoutError(400, 'items must be a list');
+  if (list.length > CART_MAX_LINES) throw new CheckoutError(400, `A cart can hold at most ${CART_MAX_LINES} different items`);
+  const merged = new Map();
+  for (const i of list) {
+    const quantity = Number(i && i.quantity);
+    if (!i || typeof i.productId !== 'string' || !i.productId) throw new CheckoutError(400, 'Invalid item in cart');
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) throw new CheckoutError(400, 'Invalid item quantity');
+    const size = i.size ? String(i.size) : null;
+    const color = i.color ? String(i.color) : null;
+    const key = `${i.productId}|${size || ''}|${color || ''}`;
+    if (merged.has(key)) merged.get(key).quantity = Math.min(100, merged.get(key).quantity + quantity);
+    else merged.set(key, { productId: i.productId, size, color, quantity });
+  }
+  return [...merged.values()];
+}
+
+// Checks every saved line against the live catalogue (same rules as checkout).
+async function buildCartView(items) {
+  const ids = [...new Set(items.map(i => i.productId))];
+  const products = ids.length
+    ? await prisma.product.findMany({ where: { id: { in: ids } }, include: { variants: true, category: true } })
+    : [];
+  const byId = new Map(products.map(p => [p.id, p]));
+  return items.map(i => {
+    const base = { productId: i.productId, size: i.size || null, color: i.color || null, quantity: i.quantity };
+    const p = byId.get(i.productId);
+    if (!p) return { ...base, available: false, reason: 'This product is no longer available' };
+    const info = { name: p.name, slug: p.slug, imageUrl: (p.imageUrls || [])[0] || null };
+    if (p.status === 'OUT_OF_STOCK') return { ...base, ...info, available: false, stock: 0, reason: `${p.name} is out of stock` };
+    if (p.status !== 'ACTIVE' || !p.category.isActive) return { ...base, ...info, available: false, reason: `${p.name} is not available right now` };
+
+    let stock; let price;
+    if (p.variants.length > 0) {
+      const v = p.variants.find(v => (v.size || null) === (base.size) && (v.color || null) === (base.color));
+      if (!v) return { ...base, ...info, available: false, reason: `${p.name} is no longer available in that size/colour` };
+      stock = v.stock;
+      price = v.price != null ? Number(v.price) : Number(p.price);
+    } else {
+      stock = p.stock;
+      price = Number(p.price);
+    }
+    if (stock <= 0) return { ...base, ...info, price, stock: 0, available: false, reason: `${p.name} is out of stock` };
+    const quantity = Math.min(i.quantity, stock);
+    return { ...base, ...info, quantity, price, stock, available: true, adjusted: quantity !== i.quantity };
+  });
+}
+
+app.get('/api/cart', requireAuth, async (req, res) => {
+  try {
+    const row = await prisma.userCart.findUnique({ where: { userId: req.user.userId } });
+    const items = Array.isArray(row && row.items) ? row.items : [];
+    res.json({ items: await buildCartView(items) });
+  } catch (err) {
+    res.status(500).json({ error: friendlyError(err) });
+  }
+});
+
+// Replaces the whole saved cart. Stock is NOT enforced here (it is a wish list of what the
+// customer wants); GET reports availability and checkout enforces it.
+app.put('/api/cart', requireAuth, async (req, res) => {
+  try {
+    const items = parseCartBody(req.body);
+    await prisma.userCart.upsert({
+      where: { userId: req.user.userId },
+      update: { items },
+      create: { userId: req.user.userId, items },
+    });
+    res.json({ items: await buildCartView(items) });
+  } catch (err) {
+    if (err instanceof CheckoutError) return res.status(err.status).json({ error: err.message });
+    res.status(400).json({ error: friendlyError(err) });
+  }
+});
+
+async function visibleWishlistIds(ids) {
+  if (ids.length === 0) return [];
+  const rows = await prisma.product.findMany({
+    where: { id: { in: ids }, status: { not: 'DRAFT' }, category: { isActive: true } },
+    select: { id: true },
+  });
+  const ok = new Set(rows.map(r => r.id));
+  return ids.filter(id => ok.has(id));
+}
+
+app.get('/api/wishlist', requireAuth, async (req, res) => {
+  try {
+    const row = await prisma.userWishlist.findUnique({ where: { userId: req.user.userId } });
+    res.json({ productIds: await visibleWishlistIds((row && row.productIds) || []) });
+  } catch (err) {
+    res.status(500).json({ error: friendlyError(err) });
+  }
+});
+
+app.put('/api/wishlist', requireAuth, async (req, res) => {
+  try {
+    const raw = Array.isArray(req.body) ? req.body : req.body && req.body.productIds;
+    if (!Array.isArray(raw) || raw.some(id => typeof id !== 'string' || !id)) {
+      throw new CheckoutError(400, 'productIds must be a list of product ids');
+    }
+    const productIds = [...new Set(raw)];
+    if (productIds.length > WISHLIST_MAX) throw new CheckoutError(400, `A wishlist can hold at most ${WISHLIST_MAX} products`);
+    await prisma.userWishlist.upsert({
+      where: { userId: req.user.userId },
+      update: { productIds },
+      create: { userId: req.user.userId, productIds },
+    });
+    res.json({ productIds: await visibleWishlistIds(productIds) });
+  } catch (err) {
+    if (err instanceof CheckoutError) return res.status(err.status).json({ error: err.message });
+    res.status(400).json({ error: friendlyError(err) });
+  }
 });
 
 // ── Admin: Users ─────────────────────────────────────────────

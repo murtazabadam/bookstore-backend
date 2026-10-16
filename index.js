@@ -43,6 +43,77 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// ── Razorpay webhook ─────────────────────────────────────────
+// Safety net for the gap in /api/checkout/verify: if the customer pays but the
+// browser never calls verify (tab closed, network drop), Razorpay still tells us.
+// MUST be registered BEFORE express.json(): the signature is computed over the
+// raw request bytes, and JSON parsing would consume/alter them.
+// Order creation stays in /verify (it needs the shipping address, which only the
+// browser has) — this handler only checks the signature and flags paid checkouts
+// that never became an order, so they can be fulfilled or refunded by hand.
+app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) {
+    console.error('RAZORPAY_WEBHOOK_SECRET is not set — cannot verify webhooks');
+    return res.status(500).json({ error: 'Webhook not configured' });
+  }
+
+  const signature = req.headers['x-razorpay-signature'];
+  if (typeof signature !== 'string' || !Buffer.isBuffer(req.body)) {
+    return res.status(400).json({ error: 'Missing signature' });
+  }
+
+  const expected = crypto.createHmac('sha256', secret).update(req.body).digest('hex');
+  const given = Buffer.from(signature, 'hex');
+  const want = Buffer.from(expected, 'hex');
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+    return res.status(400).json({ error: 'Invalid signature' });
+  }
+
+  let event;
+  try {
+    event = JSON.parse(req.body.toString('utf8'));
+  } catch {
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+
+  try {
+    const type = event.event;
+    const payment = event.payload?.payment?.entity;
+
+    if (type === 'payment.captured' || type === 'order.paid') {
+      const paymentId = payment?.id;
+      const razorpayOrderId = payment?.order_id || event.payload?.order?.entity?.id;
+      if (paymentId && razorpayOrderId) {
+        const order = await prisma.order.findUnique({ where: { razorpayPaymentId: paymentId } });
+        if (!order) {
+          const checkout = await prisma.checkoutSession.findUnique({ where: { razorpayOrderId } });
+          // No checkout of ours → not a payment for this store's cart; nothing to do.
+          // A checkout with no order is normal for a few seconds (verify is still running),
+          // so check Render logs for this line again later before acting on it.
+          if (checkout) {
+            console.warn('PAID_WITHOUT_ORDER', {
+              event: type, razorpayOrderId, paymentId,
+              amountPaise: payment?.amount, userId: checkout.userId,
+              checkoutConsumed: !!checkout.consumedAt,
+            });
+          }
+        }
+      }
+    } else if (type === 'payment.failed') {
+      console.log('Payment failed', {
+        paymentId: payment?.id, razorpayOrderId: payment?.order_id,
+        reason: payment?.error_description,
+      });
+    }
+  } catch (err) {
+    console.error('Webhook handler error', err);
+    return res.status(500).json({ error: 'Handler failed' }); // non-2xx → Razorpay retries
+  }
+
+  res.status(200).json({ received: true });
+});
+
 app.use(express.json());
 
 app.use(session({

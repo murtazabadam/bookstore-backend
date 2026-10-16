@@ -223,7 +223,13 @@ The server prices the cart itself and remembers it against the Razorpay order id
 - `502` could not reach Razorpay to confirm the payment
 - `500` unexpected error (customer is told to contact support if charged)
 
-**Known limitation:** if the customer pays but the browser never calls `verify` (tab closed, network drop), no order is created. A Razorpay webhook would close this gap — not built yet.
+### `POST /api/payments/webhook` *(Razorpay → server only; the frontend never calls this)*
+Called by Razorpay, not by the app. Registered in the Razorpay dashboard (Settings → Webhooks) for `payment.captured`, `payment.failed` and `order.paid`. Needs the `RAZORPAY_WEBHOOK_SECRET` env var, which must match the secret saved in the dashboard. Test Mode and Live Mode have separate webhooks.
+The body is read raw and the `X-Razorpay-Signature` header is checked against it, so this route is mounted **before** `express.json()` in `index.js` — keep it there.
+**Responses:** `200 { "received": true }` for any valid event (including ones it ignores); `400` missing/invalid signature or bad JSON; `500` secret not configured or handler crashed (Razorpay retries non-2xx responses).
+**What it does:** it does **not** create orders (that needs the shipping address, which only `verify` receives). If a payment is captured and no order exists for it yet, but a saved checkout does, it logs `PAID_WITHOUT_ORDER` with the order id, payment id, amount and user id in the server logs. This line can appear briefly during a normal checkout while `verify` is still running; if it is still unmatched later, fulfil or refund that payment by hand in the Razorpay dashboard.
+
+**Known limitation:** if the customer pays but the browser never calls `verify` (tab closed, network drop), no order is created automatically. The webhook now flags these cases in the logs so they can be handled by hand. Creating the order automatically would need the shipping address saved with the checkout at `create-order` time (schema change + a frontend change).
 
 ---
 

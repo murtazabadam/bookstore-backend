@@ -1020,7 +1020,11 @@ app.put('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) => 
 
     const updateData = {};
     if (status) updateData.status = status;
-    if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
+    if (trackingNumber !== undefined) {
+      // "", whitespace or null clears the tracking number; anything else is trimmed and saved.
+      const t = trackingNumber == null ? '' : String(trackingNumber).trim();
+      updateData.trackingNumber = t || null;
+    }
 
     if (status === 'CANCELLED' && existing.status !== 'CANCELLED') {
       for (const item of existing.items) {

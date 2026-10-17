@@ -346,7 +346,7 @@ Deleting an account (`DELETE /api/auth/me`) also deletes its saved cart and wish
 ```
 (no flat `customerName` / `customerEmail`). `razorpayPaymentId`, `shippingAddress` and `trackingNumber` are always present on the order (`null` when empty).
 
-`PUT /api/admin/orders/:id` — `{ "status": "SHIPPED", "trackingNumber": "RXXXXXXXXXIN" }` (either field optional). Valid `status`: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`. Returns the updated order (without `items`).
+`PUT /api/admin/orders/:id` — `{ "status": "SHIPPED", "trackingNumber": "RXXXXXXXXXIN" }` (either field optional). Send `trackingNumber` as `""` (or `null`) to **clear** it; the value is trimmed, and blank is stored as `null`. Valid `status`: `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`. Returns the updated order (without `items`).
 - Moving an order **to `CANCELLED` puts every item back in stock** (the matching variant if there is one, then the product total). **No refund is made** — refund in the Razorpay dashboard.
 - A cancelled order is **locked**: any other status → `400 { "error": "Cannot change the status of a cancelled order" }`.
 - Orders are only created after a captured payment, so new orders start as `PAID`; `PENDING` is not used by checkout.
